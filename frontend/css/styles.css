@@ -495,3 +495,52 @@ body {
     margin-left: 47px;
   }
 }
+
+
+/* Fase 5: confirmaciones visuales de mensajes y acciones de publicaciones. */
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  min-height: 16px;
+}
+.message-row.mine .message-meta {
+  justify-content: flex-end;
+}
+.message-row:not(.mine) .message-meta {
+  justify-content: flex-start;
+}
+.message-time {
+  color: #758096;
+  font-size: 11px;
+  line-height: 1.2;
+}
+.message-status {
+  display: inline-flex;
+  align-items: center;
+  font-size: 16px;
+  line-height: 1;
+}
+.message-status-sent,
+.message-status-delivered {
+  color: #8a93a5;
+}
+.message-status-read {
+  color: #4da3ff;
+}
+.conversation-avatar-profile {
+  cursor: pointer;
+  outline-offset: 2px;
+}
+.conversation-avatar-profile:hover {
+  box-shadow: 0 0 0 2px var(--conig-primary);
+}
+.profile-post-actions .dropdown-toggle::after {
+  display: none;
+}
+.profile-post-actions .btn {
+  width: 34px;
+  height: 32px;
+  padding: 4px;
+}

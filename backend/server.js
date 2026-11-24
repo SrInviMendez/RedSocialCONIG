@@ -855,6 +855,55 @@ app.post("/api/replication/posts", async (req, res) => {
 
   const { eventId, type, sourceRegion, payload } = body;
 
+  if (type === "POST_DELETED") {
+    if (
+      typeof eventId !== "string" || !eventId ||
+      typeof sourceRegion !== "string" || !sourceRegion || sourceRegion === REGION ||
+      !payload || typeof payload.postId !== "string" || !payload.postId ||
+      !ObjectId.isValid(payload.authorId)
+    ) {
+      return res.status(400).json({ error: "Datos de eliminación de publicación inválidos" });
+    }
+
+    const deletedAt = new Date(payload.deletedAt);
+    if (Number.isNaN(deletedAt.getTime())) {
+      return res.status(400).json({ error: "Fecha de eliminación inválida" });
+    }
+
+    const session = client.startSession();
+    let duplicate = false;
+    try {
+      await session.withTransaction(async () => {
+        const processed = await db.collection("processed_events").findOne({ eventId }, { session });
+        if (processed) {
+          duplicate = true;
+          return;
+        }
+
+        await db.collection("posts").deleteOne(
+          { postId: payload.postId, authorId: new ObjectId(payload.authorId) },
+          { session }
+        );
+        await db.collection("likes").deleteMany({ postId: payload.postId }, { session });
+        await db.collection("processed_events").insertOne({
+          eventId,
+          sourceRegion,
+          processedAt: new Date()
+        }, { session });
+      });
+
+      return res.json({
+        message: duplicate ? "Eliminación ya procesada" : "Publicación eliminada en la otra región",
+        duplicate
+      });
+    } catch (error) {
+      console.error("Error replicando eliminación de publicación:", error.message);
+      return res.status(500).json({ error: "No se pudo replicar la eliminación" });
+    } finally {
+      await session.endSession();
+    }
+  }
+
   if (
     !eventId ||
     type !== "POST_CREATED" ||
@@ -2779,6 +2828,79 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
   }
 });
 
+// El autor puede borrar su publicación únicamente durante la primera hora.
+app.delete("/api/posts/:postId", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub) || typeof req.params.postId !== "string" || !req.params.postId.trim()) {
+    return res.status(400).json({ error: "Identificador de publicación inválido" });
+  }
+
+  const authorId = new ObjectId(req.auth.sub);
+  const postId = req.params.postId;
+  const deletedAt = new Date();
+  const eventId = randomUUID();
+  const session = client.startSession();
+  let deletedPost = null;
+
+  try {
+    await session.withTransaction(async () => {
+      const post = await db.collection("posts").findOne(
+        { postId, authorId, sourceRegion: REGION },
+        { session }
+      );
+
+      if (!post) {
+        const error = new Error("No se encontró una publicación propia para eliminar");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      const createdAt = new Date(post.createdAt);
+      const elapsed = deletedAt.getTime() - createdAt.getTime();
+      if (Number.isNaN(createdAt.getTime()) || elapsed < 0 || elapsed > 60 * 60 * 1000) {
+        const error = new Error("Solo puedes borrar una publicación durante la primera hora.");
+        error.statusCode = 410;
+        throw error;
+      }
+
+      deletedPost = post;
+      await db.collection("posts").deleteOne({ postId, authorId }, { session });
+      await db.collection("likes").deleteMany({ postId }, { session });
+      await db.collection("outbox").insertOne({
+        eventId,
+        type: "POST_DELETED",
+        sourceRegion: REGION,
+        createdAt: deletedAt,
+        payload: {
+          postId,
+          authorId: authorId.toString(),
+          deletedAt
+        }
+      }, { session });
+    });
+
+    if (deletedPost && deletedPost.imagePublicId) {
+      try {
+        await cloudinary.uploader.destroy(
+          deletedPost.imagePublicId,
+          { resource_type: "image" }
+        );
+      } catch (cleanupError) {
+        console.error("No se pudo borrar la imagen de Cloudinary:", cleanupError.message);
+      }
+    }
+
+    return res.json({ message: "Publicación eliminada correctamente", postId });
+  } catch (error) {
+    console.error("Error eliminando publicación:", error.message);
+    return res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "No se pudo eliminar la publicación"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
+
 // Dar me gusta a una publicación
 app.post("/api/likes/:postId", authenticateToken, async (req, res) => {
   const postId = req.params.postId;
@@ -3191,6 +3313,40 @@ app.patch("/api/conversations/:conversationId/accept", authenticateToken, async 
         const error = new Error("Solo la persona que recibió la solicitud puede aceptarla");
         error.statusCode = 403;
         throw error;
+      }
+
+      const requesterId = conversation.requestedBy;
+      const mutualFollowRelations = [
+        { followerId: userId, followedId: requesterId },
+        { followerId: requesterId, followedId: userId }
+      ];
+
+      for (const relation of mutualFollowRelations) {
+        const followResult = await db.collection("follows").updateOne(
+          relation,
+          {
+            $setOnInsert: {
+              ...relation,
+              sourceRegion: REGION,
+              createdAt: acceptedAt
+            }
+          },
+          { upsert: true, session }
+        );
+
+        if (followResult.upsertedCount > 0) {
+          await db.collection("outbox").insertOne({
+            eventId: randomUUID(),
+            type: "FOLLOW_CREATED",
+            sourceRegion: REGION,
+            createdAt: acceptedAt,
+            payload: {
+              followerId: relation.followerId.toString(),
+              followedId: relation.followedId.toString(),
+              createdAt: acceptedAt
+            }
+          }, { session });
+        }
       }
 
       await db.collection("conversations").updateOne(
@@ -3607,7 +3763,8 @@ async function replicatePendingEvents() {
           "MESSAGE_DELIVERED",
           "MESSAGE_READ",
           "CONVERSATION_ACCEPTED",
-          "CONVERSATION_CLEARED"
+          "CONVERSATION_CLEARED",
+          "POST_DELETED"
         ]
       },
       deliveredAt: { $exists: false },
@@ -3622,6 +3779,11 @@ async function replicatePendingEvents() {
           "payload.userId": { $type: "string" },
           "payload.homeRegion": { $type: "string" },
           "payload.updatedAt": { $exists: true }
+        },
+        {
+          type: "POST_DELETED",
+          "payload.postId": { $type: "string" },
+          "payload.authorId": { $type: "string" }
         },
         {
           type: { $in: ["FOLLOW_CREATED", "FOLLOW_DELETED"] },
@@ -3668,7 +3830,7 @@ async function replicatePendingEvents() {
 
       try {
         const response = await fetch(
-          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : ["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(event.type) ? "conversations" : "messages"}`,
+          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : ["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(event.type) ? "conversations" : event.type === "POST_DELETED" ? "posts" : "messages"}`,
           {
             method: "POST",
             headers: {
@@ -3817,7 +3979,7 @@ async function startServer() {
         console.log(`Nodo compañero: ${PEER_URL}`);
 
         replicatePendingEvents();
-        setInterval(replicatePendingEvents, 5000);
+        setInterval(replicatePendingEvents, 2000);
 
         dispatchPendingAuditEvents();
         setInterval(dispatchPendingAuditEvents, 10000);

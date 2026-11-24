@@ -11,7 +11,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   const showConversationsTab = document.getElementById("showConversationsTab");
   const showFollowingTab = document.getElementById("showFollowingTab");
   const navBadge = document.getElementById("messageNavBadge");
+  const profilePromptModal = new bootstrap.Modal(document.getElementById("profilePromptModal"));
+  const profilePromptName = document.getElementById("profilePromptName");
+  const profilePromptUsername = document.getElementById("profilePromptUsername");
+  const profilePromptConfirm = document.getElementById("profilePromptConfirm");
   const requestedUserId = new URLSearchParams(window.location.search).get("userId");
+  let profileTarget = null;
 
   let activeConversation = null;
   let conversations = [];
@@ -27,6 +32,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     return element;
   }
 
+  profilePromptConfirm.addEventListener("click", () => {
+    if (!profileTarget || !profileTarget.userId) return;
+    window.location.href = "perfil.html?userId=" + encodeURIComponent(profileTarget.userId);
+  });
+
   function avatarFor(user, className) {
     if (user && user.avatarUrl) {
       const image = node("img", className);
@@ -37,6 +47,33 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     return node("span", className + " conversation-avatar-placeholder",
       ((user && user.username) || "U").charAt(0).toUpperCase());
+  }
+
+  function profileAvatarFor(user, className) {
+    const avatar = avatarFor(user, className);
+    if (!user || !user.userId) return avatar;
+
+    avatar.classList.add("conversation-avatar-profile");
+    avatar.title = "Ver perfil";
+    avatar.setAttribute("role", "button");
+    avatar.setAttribute("tabindex", "0");
+
+    function openProfile(event) {
+      event.preventDefault();
+      event.stopPropagation();
+      profileTarget = user;
+      profilePromptName.textContent = user.displayName || user.username || "Usuario";
+      profilePromptUsername.textContent = user.username ? "@" + user.username : "";
+      profilePromptModal.show();
+    }
+
+    avatar.addEventListener("click", openProfile);
+    avatar.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        openProfile(event);
+      }
+    });
+    return avatar;
   }
 
   function updateBadge() {
@@ -56,7 +93,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const pending = node("button", "conversation-entry active", "");
       pending.type = "button";
       const row = node("span", "conversation-entry-row");
-      row.append(avatarFor(activeConversation.participant, "conversation-avatar"));
+      row.append(profileAvatarFor(activeConversation.participant, "conversation-avatar"));
       const identity = node("span", "conversation-entry-identity");
       identity.append(node("strong", "", "Nueva conversación"));
       identity.append(node("small", "text-secondary", "@" + activeConversation.participant.username));
@@ -79,7 +116,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         button.classList.add("active");
       }
       const row = node("span", "conversation-entry-row");
-      row.append(avatarFor(conversation.participant, "conversation-avatar"));
+      row.append(profileAvatarFor(conversation.participant, "conversation-avatar"));
       const identity = node("span", "conversation-entry-identity");
       identity.append(node("strong", "", "@" + conversation.participant.username));
       let detail = conversation.lastMessage ? conversation.lastMessage.content : "Conversación";
@@ -136,6 +173,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           await loadConversations(true);
           activeConversation = conversations.find(item => item.conversationId === activeConversation.conversationId) || activeConversation;
           await loadHistory(false);
+          notice.append(node("div", "alert alert-success py-2 small mb-0 mt-2",
+            "Conversación aceptada. Ahora se siguen mutuamente."));
         } catch (error) {
           alert(error.message);
           accept.disabled = false;
@@ -147,6 +186,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       form.querySelector("input[name=content]").disabled = !activeConversation;
     }
     chatActions.classList.toggle("d-none", !activeConversation || !activeConversation.conversationId);
+  }
+
+  function messageStatusInfo(status) {
+    if (status === "read") {
+      return { icon: "bi-check2-all", className: "message-status-read", label: "Leído" };
+    }
+    if (status === "delivered") {
+      return { icon: "bi-check2-all", className: "message-status-delivered", label: "Entregado" };
+    }
+    return { icon: "bi-check2", className: "message-status-sent", label: "Enviado" };
   }
 
   async function markMessagesRead(messages) {
@@ -193,9 +242,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         data.messages.forEach(message => {
           const mine = message.senderId === currentUser.id;
           const bubble = node("div", "message-bubble " + (mine ? "message-mine" : "message-other"), message.content);
-          const date = node("small", "text-secondary d-block mt-1", new Date(message.createdAt).toLocaleString("es-CO"));
+          const metadata = node("div", "message-meta");
+          if (mine) {
+            const statusInfo = messageStatusInfo(message.deliveryStatus);
+            const status = node("span", "message-status " + statusInfo.className);
+            status.append(node("i", "bi " + statusInfo.icon));
+            status.title = statusInfo.label;
+            status.setAttribute("aria-label", statusInfo.label);
+            metadata.append(status);
+          }
+          const date = node("small", "message-time", new Date(message.createdAt).toLocaleString("es-CO"));
+          metadata.append(date);
           const wrapper = node("div", mine ? "message-row mine" : "message-row");
-          wrapper.append(bubble, date);
+          wrapper.append(bubble, metadata);
           history.append(wrapper);
         });
         await markMessagesRead(data.messages);
@@ -259,7 +318,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const button = node("button", "conversation-entry", "");
         button.type = "button";
         const row = node("span", "conversation-entry-row");
-        row.append(avatarFor(person, "conversation-avatar"));
+        row.append(profileAvatarFor(person, "conversation-avatar"));
         const identity = node("span", "conversation-entry-identity");
         identity.append(node("strong", "", person.displayName || person.username));
         identity.append(node("small", "text-secondary", "@" + person.username));
@@ -375,7 +434,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     form.elements.content.disabled = true;
     await loadConversations(false);
     if (requestedUserId) await openRequestedConversation(requestedUserId);
-    window.setInterval(pollMessages, 2500);
+    window.setInterval(pollMessages, 1500);
   } catch (error) {
     history.textContent = error.message;
   }

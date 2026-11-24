@@ -14,12 +14,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const editAvatarPreview = document.getElementById("editAvatarPreview");
   const editAvatarPreviewContainer = document.getElementById("editAvatarPreviewContainer");
   const editProfileModal = new bootstrap.Modal(document.getElementById("editProfileModal"));
+  const deletePostModal = new bootstrap.Modal(document.getElementById("deletePostModal"));
+  const deletePostMessage = document.getElementById("deletePostMessage");
+  const confirmDeletePostButton = document.getElementById("confirmDeletePostButton");
   const params = new URLSearchParams(window.location.search);
   const requestedUserId = params.get("userId");
   let recommendationUsers = [];
   let showExpandedRecommendations = false;
   let viewedProfile = null;
   let previewUrl = null;
+  let currentUserId = null;
+  let activeProfileId = null;
+  let canManageOwnPosts = false;
+  let selectedPostForDelete = null;
 
   function node(tag, className, text) {
     const item = document.createElement(tag);
@@ -127,6 +134,41 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       result.posts.forEach(post => {
         const card = node("article", "profile-post-card mb-3");
+        const postCreatedAt = new Date(post.createdAt);
+        const postAge = Date.now() - postCreatedAt.getTime();
+
+        if (
+          canManageOwnPosts &&
+          post.authorId === currentUserId &&
+          Number.isFinite(postAge) &&
+          postAge >= 0 &&
+          postAge <= 60 * 60 * 1000
+        ) {
+          const actions = node("div", "profile-post-actions d-flex justify-content-end mb-2");
+          const dropdown = node("div", "dropdown");
+          const menuButton = node("button", "btn btn-sm btn-light text-secondary", "");
+          menuButton.type = "button";
+          menuButton.setAttribute("data-bs-toggle", "dropdown");
+          menuButton.setAttribute("aria-expanded", "false");
+          menuButton.setAttribute("aria-label", "Opciones de publicación");
+          menuButton.innerHTML = '<i class="bi bi-three-dots"></i>';
+
+          const menu = node("ul", "dropdown-menu dropdown-menu-end");
+          const item = node("li", "");
+          const deleteButton = node("button", "dropdown-item text-danger", "Borrar publicación");
+          deleteButton.type = "button";
+          deleteButton.addEventListener("click", () => {
+            selectedPostForDelete = post;
+            deletePostMessage.textContent = "";
+            deletePostModal.show();
+          });
+          item.append(deleteButton);
+          menu.append(item);
+          dropdown.append(menuButton, menu);
+          actions.append(dropdown);
+          card.append(actions);
+        }
+
         card.append(node("p", "post-content mb-2", post.content));
         if (post.imageUrl) {
           const image = node("img", "profile-post-image");
@@ -147,6 +189,28 @@ document.addEventListener("DOMContentLoaded", async () => {
       profilePosts.textContent = error.message;
     }
   }
+
+  confirmDeletePostButton.addEventListener("click", async () => {
+    if (!selectedPostForDelete) return;
+    const post = selectedPostForDelete;
+    confirmDeletePostButton.disabled = true;
+    deletePostMessage.className = "small text-secondary";
+    deletePostMessage.textContent = "Eliminando publicación...";
+
+    try {
+      await ConigAPI.request("/api/posts/" + encodeURIComponent(post.postId), {
+        method: "DELETE"
+      });
+      selectedPostForDelete = null;
+      deletePostModal.hide();
+      await loadProfilePosts(activeProfileId);
+    } catch (error) {
+      deletePostMessage.className = "small text-danger";
+      deletePostMessage.textContent = error.message;
+    } finally {
+      confirmDeletePostButton.disabled = false;
+    }
+  });
 
   function showAvatarPreview(file) {
     if (previewUrl) {
@@ -226,6 +290,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       : await ConigAPI.request("/api/users/" + encodeURIComponent(requestedUserId));
 
     const profileId = viewedProfile.id || viewedProfile.userId;
+    currentUserId = currentUser.id;
+    activeProfileId = profileId;
+    canManageOwnPosts = isOwnProfile;
     document.getElementById("profilePageTitle").textContent = isOwnProfile ? "Mi perfil" : "Perfil de usuario";
     document.getElementById("profileName").textContent = viewedProfile.displayName || viewedProfile.username;
     document.getElementById("profileUsername").textContent = "@" + viewedProfile.username;
