@@ -1,0 +1,122 @@
+envVarGroups:
+  - name: conig-redsocial-shared
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: REPLICATION_SECRET
+        generateValue: true
+      - key: GATEWAY_SECRET
+        generateValue: true
+
+services:
+  - type: web
+    name: conig-redsocial-api
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    envVars:
+      - fromGroup: conig-redsocial-shared
+      - key: NODE_ENV
+        value: production
+      - key: BIND_HOST
+        value: 0.0.0.0
+      - key: REGION
+        value: bogota
+      - key: GATEWAY_ONLY
+        value: "false"
+      - key: MONGO_HOST
+        value: 100.68.176.42
+      - key: MONGO_PORT
+        value: "27017"
+      - key: MONGO_DB
+        value: red_social
+      - key: MONGO_REPLICA_SET
+        value: rsBogota
+      - key: MONGO_USER
+        sync: false
+      - key: MONGO_PASSWORD
+        sync: false
+      - key: MONGO_PROXY_HOST
+        value: 127.0.0.1
+      - key: MONGO_PROXY_PORT
+        value: "1055"
+      - key: MONGO_SERVER_SELECTION_TIMEOUT_MS
+        value: "15000"
+      - key: PEER_TIMEOUT_MS
+        value: "75000"
+      - key: PEER_URL
+        value: https://conig-redsocial-node-cali.onrender.com
+      - key: TS_AUTHKEY
+        sync: false
+      - key: TS_HOSTNAME
+        value: red-social-render-bogota
+      - key: ATLAS_URI
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+  - type: web
+    name: conig-redsocial-node-cali
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/health
+    envVars:
+      - fromGroup: conig-redsocial-shared
+      - key: NODE_ENV
+        value: production
+      - key: BIND_HOST
+        value: 0.0.0.0
+      - key: REGION
+        value: cali
+      - key: GATEWAY_ONLY
+        value: "true"
+      - key: MONGO_HOST
+        value: 100.89.24.16
+      - key: MONGO_PORT
+        value: "27017"
+      - key: MONGO_DB
+        value: red_social
+      - key: MONGO_REPLICA_SET
+        value: rsCali
+      - key: MONGO_USER
+        sync: false
+      - key: MONGO_PASSWORD
+        sync: false
+      - key: MONGO_PROXY_HOST
+        value: 127.0.0.1
+      - key: MONGO_PROXY_PORT
+        value: "1055"
+      - key: MONGO_SERVER_SELECTION_TIMEOUT_MS
+        value: "15000"
+      - key: PEER_TIMEOUT_MS
+        value: "75000"
+      - key: PEER_URL
+        value: https://conig-redsocial-api.onrender.com
+      - key: TS_AUTHKEY
+        sync: false
+      - key: TS_HOSTNAME
+        value: red-social-render-cali
+      - key: ATLAS_URI
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+  - type: web
+    name: conig-redsocial-web
+    runtime: static
+    buildCommand: echo "Frontend CONIG listo"
+    staticPublishPath: ./frontend

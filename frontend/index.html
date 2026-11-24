@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CONIG | Inicio</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/css/bootstrap.min.css"
+ rel="stylesheet"
+ integrity="sha384-yEPZ7jP9S0QKiUQ0m3jjsO4ProIW7wvR9gXkI7JOGa2XVsw53Yke2bsdkBbjmmiX"
+ crossorigin="anonymous">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.13.2/font/bootstrap-icons.min.css" rel="stylesheet">
+<link href="css/styles.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg bg-white border-bottom sticky-top">
+  <div class="container main-container">
+    <a class="navbar-brand d-flex align-items-center gap-2" href="index.html">
+      <span class="brand-mark">C</span> CONIG
+    </a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mainNav">
+      <div class="navbar-nav ms-auto align-items-lg-center gap-lg-2">
+        <a class="nav-link" href="index.html"><i class="bi bi-house"></i> Inicio</a>
+        <a class="nav-link" href="perfil.html"><i class="bi bi-person"></i> Perfil</a>
+        <a class="nav-link" href="mensajes.html"><i class="bi bi-chat"></i> Mensajes</a>
+        <a class="nav-link" href="admin.html"><i class="bi bi-speedometer2"></i> Administración</a>
+        <button class="btn btn-outline-secondary btn-sm ms-lg-2" data-logout>
+          Cerrar sesión
+        </button>
+      </div>
+    </div>
+  </div>
+</nav>
+<main class="container main-container py-4">
+  <div class="row g-4">
+    <section class="col-lg-8">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+          <h1 class="page-title h3 mb-1">Tu comunidad</h1>
+          <p class="text-secondary mb-0">Bienvenido, <strong id="welcomeName">usuario</strong></p>
+        </div>
+        <button class="btn btn-outline-primary btn-sm" id="refreshFeed">
+          <i class="bi bi-arrow-clockwise"></i> Actualizar
+        </button>
+      </div>
+
+      <div class="card panel-card mb-4">
+        <div class="card-body">
+          <form id="postForm">
+            <label class="form-label fw-semibold">¿Qué está pasando?</label>
+            <textarea class="form-control mb-2" name="content" rows="3"
+              maxlength="280" placeholder="Comparte algo con la comunidad..." required></textarea>
+            <div class="d-flex flex-wrap justify-content-between gap-2 align-items-center">
+              <input class="form-control form-control-sm" style="max-width:240px"
+                type="file" name="image" accept="image/jpeg,image/png,image/webp">
+              <button class="btn btn-primary" type="submit">
+                <i class="bi bi-send"></i> Publicar
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <p class="text-secondary small" id="feedMessage">Cargando muro...</p>
+      <div id="postsContainer"></div>
+    </section>
+
+    <aside class="col-lg-4">
+      <div class="card panel-card">
+        <div class="card-body">
+          <h5 class="fw-bold">Red distribuida</h5>
+          <p class="text-secondary small mb-2">
+            Aquí encontrarás las publicaciones de tu comunidad.
+          </p>
+          <div class="d-flex align-items-center gap-2">
+            <i class="bi bi-database-check text-success fs-4"></i>
+            <span class="small">Tu comunidad CONIG</span>
+          </div>
+          <a href="perfil.html" class="btn btn-outline-primary w-100 mt-3">Ver mi perfil</a>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.9/dist/js/bootstrap.bundle.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/api.js"></script>
+<script src="js/feed.js"></script>
+</body>
+</html>
