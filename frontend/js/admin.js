@@ -1,5 +1,21 @@
 document.addEventListener("DOMContentLoaded", async () => {
+  if (!ConigAPI.requireAuth()) return;
+
+  // La API aún no identifica las dos cuentas administradoras.
+  // Por seguridad, nadie puede abrir este panel hasta implementar esa autorización.
+  try {
+    const currentUser = await ConigAPI.request("/api/me");
+    if (currentUser.isAdmin !== true) {
+      window.location.replace("index.html");
+      return;
+    }
+  } catch {
+    window.location.replace("login.html");
+    return;
+  }
+
   const container = document.getElementById("regionStatus");
+  const message = document.getElementById("statusMessage");
 
   function renderRegion(name, data) {
     const card = document.createElement("div");
@@ -35,8 +51,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   async function loadStatus() {
     container.replaceChildren();
-
-    const message = document.getElementById("statusMessage");
     message.textContent = "Consultando infraestructura...";
 
     try {
@@ -46,7 +60,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       );
 
       const regions = data.regions || {};
-
       renderRegion("Nodo principal", regions[data.region] || data);
 
       const peer = Object.entries(regions)

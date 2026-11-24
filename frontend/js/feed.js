@@ -4,6 +4,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   const postsContainer = document.getElementById("postsContainer");
   const feedMessage = document.getElementById("feedMessage");
   const postForm = document.getElementById("postForm");
+  const contentInput = document.getElementById("postContent");
+  const charCount = document.getElementById("postCharCount");
+  const imageInput = document.getElementById("postImageInput");
+  const imagePreviewContainer = document.getElementById("postImagePreviewContainer");
+  const imagePreview = document.getElementById("postImagePreview");
+  const imageName = document.getElementById("postImageName");
+  const removeImageButton = document.getElementById("removePostImage");
+
+  let previewUrl = null;
 
   function element(tag, className, text) {
     const node = document.createElement(tag);
@@ -11,6 +20,57 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (text !== undefined) node.textContent = text;
     return node;
   }
+
+  function updateCharacterCount() {
+    const length = contentInput.value.length;
+    charCount.textContent = `${length} / 280 caracteres`;
+    charCount.classList.toggle("text-danger", length >= 260);
+    charCount.classList.toggle("text-secondary", length < 260);
+  }
+
+  function clearImagePreview() {
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+    }
+
+    imageInput.value = "";
+    imagePreview.removeAttribute("src");
+    imagePreviewContainer.classList.add("d-none");
+    imageName.textContent = "Ninguna imagen seleccionada";
+  }
+
+  contentInput.addEventListener("input", updateCharacterCount);
+  updateCharacterCount();
+
+  imageInput.addEventListener("change", () => {
+    const file = imageInput.files[0];
+    if (!file) {
+      clearImagePreview();
+      return;
+    }
+
+    const allowedTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowedTypes.includes(file.type)) {
+      alert("Selecciona una imagen JPEG, PNG o WebP.");
+      clearImagePreview();
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert("La imagen no puede superar los 5 MB.");
+      clearImagePreview();
+      return;
+    }
+
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(file);
+    imagePreview.src = previewUrl;
+    imagePreviewContainer.classList.remove("d-none");
+    imageName.textContent = file.name;
+  });
+
+  removeImageButton.addEventListener("click", clearImagePreview);
 
   async function loadPosts() {
     postsContainer.replaceChildren();
@@ -30,10 +90,32 @@ document.addEventListener("DOMContentLoaded", async () => {
         const card = element("article", "card post-card mb-3");
         const body = element("div", "card-body");
 
-        const header = element("div", "d-flex justify-content-between align-items-center mb-3");
-        const author = element("div", "fw-semibold",
-          `Usuario ${String(post.authorId).slice(-6)}`);
-        header.append(author);
+        const header = element("div", "d-flex align-items-center gap-2 mb-3");
+        const author = post.author || {};
+        const authorId = author.userId || post.authorId;
+        const authorName = author.username ? `@${author.username}` : "Usuario";
+
+        const profileLink = element("a", "post-author-link d-flex align-items-center gap-2 text-decoration-none");
+        if (authorId) profileLink.href = `perfil.html?userId=${encodeURIComponent(authorId)}`;
+
+        if (author.avatarUrl) {
+          const avatar = element("img", "post-author-avatar");
+          avatar.src = author.avatarUrl;
+          avatar.alt = `Foto de perfil de ${authorName}`;
+          avatar.loading = "lazy";
+          profileLink.append(avatar);
+        } else {
+          profileLink.append(element("span", "post-author-avatar post-author-placeholder",
+            authorName.charAt(1).toUpperCase() || "U"));
+        }
+
+        const identity = element("span", "d-flex flex-column");
+        identity.append(element("strong", "post-author-username", authorName));
+        if (author.displayName) {
+          identity.append(element("small", "text-secondary", author.displayName));
+        }
+        profileLink.append(identity);
+        header.append(profileLink);
         body.append(header);
 
         body.append(element("p", "post-content mb-3", post.content));
@@ -88,8 +170,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   postForm.addEventListener("submit", async event => {
     event.preventDefault();
 
-    const content = postForm.content.value.trim();
-    const file = postForm.image.files[0];
+    const content = contentInput.value.trim();
+    const file = imageInput.files[0];
 
     if (!content || content.length > 280) {
       return alert("La publicación debe tener entre 1 y 280 caracteres.");
@@ -114,6 +196,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
 
       postForm.reset();
+      clearImagePreview();
+      updateCharacterCount();
       await loadPosts();
 
     } catch (error) {

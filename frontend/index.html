@@ -22,10 +22,9 @@
     </button>
     <div class="collapse navbar-collapse" id="mainNav">
       <div class="navbar-nav ms-auto align-items-lg-center gap-lg-2">
-        <a class="nav-link" href="index.html"><i class="bi bi-house"></i> Inicio</a>
+        <a class="nav-link active" href="index.html"><i class="bi bi-house"></i> Inicio</a>
         <a class="nav-link" href="perfil.html"><i class="bi bi-person"></i> Perfil</a>
         <a class="nav-link" href="mensajes.html"><i class="bi bi-chat"></i> Mensajes</a>
-        <a class="nav-link" href="admin.html"><i class="bi bi-speedometer2"></i> Administración</a>
         <button class="btn btn-outline-secondary btn-sm ms-lg-2" data-logout>
           Cerrar sesión
         </button>
@@ -49,12 +48,32 @@
       <div class="card panel-card mb-4">
         <div class="card-body">
           <form id="postForm">
-            <label class="form-label fw-semibold">¿Qué está pasando?</label>
-            <textarea class="form-control mb-2" name="content" rows="3"
+            <label class="form-label fw-semibold" for="postContent">¿Qué está pasando?</label>
+            <textarea id="postContent" class="form-control mb-1" name="content" rows="3"
               maxlength="280" placeholder="Comparte algo con la comunidad..." required></textarea>
+            <div class="d-flex justify-content-end mb-3">
+              <small id="postCharCount" class="text-secondary" aria-live="polite">0 / 280 caracteres</small>
+            </div>
+
+            <div id="postImagePreviewContainer" class="post-image-preview-container d-none mb-3">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <span class="small fw-semibold">Vista previa de la imagen</span>
+                <button class="btn btn-sm btn-outline-secondary" id="removePostImage" type="button">
+                  <i class="bi bi-x-circle"></i> Quitar imagen
+                </button>
+              </div>
+              <img id="postImagePreview" class="post-image-preview" alt="Vista previa de la imagen seleccionada">
+            </div>
+
             <div class="d-flex flex-wrap justify-content-between gap-2 align-items-center">
-              <input class="form-control form-control-sm" style="max-width:240px"
-                type="file" name="image" accept="image/jpeg,image/png,image/webp">
+              <div>
+                <input class="visually-hidden" id="postImageInput" type="file" name="image"
+                  accept="image/jpeg,image/png,image/webp">
+                <label class="btn btn-outline-primary mb-0" for="postImageInput">
+                  <i class="bi bi-image"></i> Elegir imagen
+                </label>
+                <small id="postImageName" class="text-secondary ms-2">Ninguna imagen seleccionada</small>
+              </div>
               <button class="btn btn-primary" type="submit">
                 <i class="bi bi-send"></i> Publicar
               </button>
