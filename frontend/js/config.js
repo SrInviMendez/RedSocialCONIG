@@ -1,9 +1,35 @@
 (() => {
-  const API_BASE_URL =
-    "https://conig-redsocial-api.onrender.com";
+  const API_PRIMARY = "https://conig-redsocial-api.onrender.com";
+  const API_SECONDARY = "https://conig-redsocial-node-cali.onrender.com";
+
+  function getApiCandidates() {
+    const unavailableUntil = Number(
+      sessionStorage.getItem("conig_primary_unavailable_until") || 0
+    );
+
+    return Date.now() < unavailableUntil
+      ? [API_SECONDARY, API_PRIMARY]
+      : [API_PRIMARY, API_SECONDARY];
+  }
 
   window.CONIG = {
-    getApi: () => API_BASE_URL
+    getApi: () => getApiCandidates()[0],
+    getApiCandidates,
+
+    markApiFailure(base) {
+      if (base === API_PRIMARY) {
+        sessionStorage.setItem(
+          "conig_primary_unavailable_until",
+          String(Date.now() + 30000)
+        );
+      }
+    },
+
+    markApiSuccess(base) {
+      if (base === API_PRIMARY) {
+        sessionStorage.removeItem("conig_primary_unavailable_until");
+      }
+    }
   };
 
   document.addEventListener("DOMContentLoaded", () => {

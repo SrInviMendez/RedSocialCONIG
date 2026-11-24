@@ -79,7 +79,7 @@ services:
       - key: REGION
         value: cali
       - key: GATEWAY_ONLY
-        value: "true"
+        value: "false"
       - key: MONGO_HOST
         value: 100.89.24.16
       - key: MONGO_PORT

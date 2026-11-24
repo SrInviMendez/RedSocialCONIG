@@ -7,6 +7,9 @@
       timeoutMs = 95000
     } = options;
 
+    const requestMethod = String(method).toUpperCase();
+    const canRetryOnNetwork = ["GET", "HEAD", "OPTIONS"].includes(requestMethod);
+
     const headers = {};
     const token = sessionStorage.getItem("conig_token");
 
@@ -23,59 +26,99 @@
       body = JSON.stringify(data);
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const bases = CONIG.getApiCandidates();
+    let lastError = null;
 
-    try {
-      const response = await fetch(
-        `${CONIG.getApi()}${path}`,
-        {
+    for (let index = 0; index < bases.length; index++) {
+      const base = bases[index];
+      const controller = new AbortController();
+
+      const attemptTimeout = canRetryOnNetwork
+        ? Math.min(timeoutMs, 12000)
+        : timeoutMs;
+
+      const timer = setTimeout(
+        () => controller.abort(),
+        attemptTimeout
+      );
+
+      try {
+        const response = await fetch(`${base}${path}`, {
           method,
           headers,
           body,
           cache: "no-store",
           signal: controller.signal
+        });
+
+        const type = response.headers.get("content-type") || "";
+        const result = type.includes("application/json")
+          ? await response.json()
+          : await response.text();
+
+        if (!response.ok) {
+          const error = new Error(
+            typeof result === "string"
+              ? `Error HTTP ${response.status}`
+              : result?.error || `Error HTTP ${response.status}`
+          );
+
+          error.status = response.status;
+
+          if (response.status === 404 || response.status >= 500) {
+            CONIG.markApiFailure(base);
+          }
+
+          const canFailover =
+            response.status === 404 ||
+            (canRetryOnNetwork && response.status >= 500);
+
+          if (canFailover && index < bases.length - 1) {
+            lastError = error;
+            continue;
+          }
+
+          if (response.status === 401 && auth) {
+            sessionStorage.removeItem("conig_token");
+            sessionStorage.removeItem("conig_user");
+          }
+
+          throw error;
         }
-      );
 
-      const type = response.headers.get("content-type") || "";
-      const result = type.includes("application/json")
-        ? await response.json()
-        : await response.text();
+        CONIG.markApiSuccess(base);
+        return result;
 
-      if (!response.ok) {
-        const error = new Error(
-          result?.error || `Error HTTP ${response.status}`
-        );
+      } catch (error) {
+        if (error.status) throw error;
 
-        error.status = response.status;
+        let normalizedError = error;
 
-        if (response.status === 401 && auth) {
-          sessionStorage.removeItem("conig_token");
-          sessionStorage.removeItem("conig_user");
+        if (error.name === "AbortError") {
+          normalizedError = new Error(
+            "El servidor tardó demasiado en responder."
+          );
+        } else if (error instanceof TypeError) {
+          normalizedError = new Error(
+            "No se pudo conectar con el nodo. Se comprobaron las regiones disponibles."
+          );
         }
 
-        throw error;
+        CONIG.markApiFailure(base);
+
+        if (canRetryOnNetwork && index < bases.length - 1) {
+          lastError = normalizedError;
+          continue;
+        }
+
+        throw normalizedError;
+
+      } finally {
+        clearTimeout(timer);
       }
-
-      return result;
-
-    } catch (error) {
-      if (error.name === "AbortError") {
-        throw new Error("El servidor tardó demasiado en responder.");
-      }
-
-      if (error instanceof TypeError) {
-        throw new Error(
-          "No se pudo conectar con CONIG. Comprueba la disponibilidad del servicio."
-        );
-      }
-
-      throw error;
-
-    } finally {
-      clearTimeout(timer);
     }
+
+    throw lastError || new Error("No hay nodos disponibles.");
   }
 
   function requireAuth() {
@@ -83,6 +126,7 @@
       window.location.href = "login.html";
       return false;
     }
+
     return true;
   }
 
