@@ -174,7 +174,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           activeConversation = conversations.find(item => item.conversationId === activeConversation.conversationId) || activeConversation;
           await loadHistory(false);
           notice.append(node("div", "alert alert-success py-2 small mb-0 mt-2",
-            "Conversación aceptada. Ahora se siguen mutuamente."));
+            "Conversación aceptada. Puedes seguir a esta persona desde su perfil cuando quieras."));
         } catch (error) {
           alert(error.message);
           accept.disabled = false;
@@ -431,6 +431,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     currentUser = await ConigAPI.request("/api/me");
+    const adminNavLink = document.getElementById("adminNavLink");
+    if (adminNavLink) adminNavLink.classList.toggle("d-none", currentUser.isAdmin !== true);
     form.elements.content.disabled = true;
     await loadConversations(false);
     if (requestedUserId) await openRequestedConversation(requestedUserId);

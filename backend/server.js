@@ -313,6 +313,7 @@ app.use(async (req, res, next) => {
       req.method === "OPTIONS" ||
       req.path === "/" ||
       req.path === "/api/health" ||
+      req.path === "/api/admin/bootstrap" ||
       req.path.startsWith("/api/replication/");
 
     const trusted = isTrustedRegionalRequest(req);
@@ -550,6 +551,31 @@ function authenticateToken(req, res, next) {
   }
 }
 
+// El rol se consulta en MongoDB en cada solicitud administrativa.
+// No se confía en un campo enviado por el navegador ni en el contenido del JWT.
+async function requireAdmin(req, res, next) {
+  try {
+    if (!ObjectId.isValid(req.auth?.sub)) {
+      return res.status(401).json({ error: "Identificador de usuario inválido" });
+    }
+
+    const user = await db.collection("users").findOne(
+      { _id: new ObjectId(req.auth.sub) },
+      { projection: { role: 1 } }
+    );
+
+    if (!user || user.role !== "admin") {
+      return res.status(403).json({ error: "No tienes permisos de administrador" });
+    }
+
+    req.adminUserId = new ObjectId(req.auth.sub);
+    next();
+  } catch (error) {
+    console.error("Error verificando permisos administrativos:", error.message);
+    res.status(500).json({ error: "No se pudieron verificar los permisos" });
+  }
+}
+
 // Página de estado del servidor
 app.get("/", (req, res) => {
   res.json({
@@ -771,6 +797,7 @@ app.post("/api/replication/users", async (req, res) => {
               email: payload.email,
               passwordHash: payload.passwordHash,
               homeRegion: payload.homeRegion,
+              role: "user",
               displayName: payload.displayName || null,
               bio: payload.bio || "",
               avatarUrl: payload.avatarUrl || null,
@@ -1711,6 +1738,82 @@ app.post("/api/replication/conversations", async (req, res) => {
 });
 
 
+// Replicar asignaciones y retiros de roles administrativos.
+app.post("/api/replication/admins", async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  const signature = req.get("x-replication-signature") || "";
+  if (!/^[a-f0-9]{64}$/i.test(signature)) {
+    return res.status(401).json({ error: "Firma inválida" });
+  }
+
+  const receivedSignature = Buffer.from(signature, "hex");
+  const expectedSignature = Buffer.from(signReplicationBody(body), "hex");
+  if (
+    receivedSignature.length !== expectedSignature.length ||
+    !timingSafeEqual(receivedSignature, expectedSignature)
+  ) {
+    return res.status(401).json({ error: "No se pudo validar el origen del evento" });
+  }
+
+  const { eventId, type, sourceRegion, payload } = body;
+  if (
+    typeof eventId !== "string" || !eventId ||
+    type !== "ADMIN_ROLE_UPDATED" ||
+    typeof sourceRegion !== "string" || !sourceRegion || sourceRegion === REGION ||
+    !payload || !ObjectId.isValid(payload.userId) ||
+    !["admin", "user"].includes(payload.role)
+  ) {
+    return res.status(400).json({ error: "Datos del cambio de rol inválidos" });
+  }
+
+  const session = client.startSession();
+  let duplicate = false;
+  try {
+    await session.withTransaction(async () => {
+      const processed = await db.collection("processed_events").findOne({ eventId }, { session });
+      if (processed) {
+        duplicate = true;
+        return;
+      }
+
+      const result = await db.collection("users").updateOne(
+        { _id: new ObjectId(payload.userId) },
+        { $set: { role: payload.role, roleUpdatedAt: new Date(payload.updatedAt) } },
+        { session }
+      );
+
+      if (!result.matchedCount) {
+        const error = new Error("El usuario todavía no está replicado en este nodo");
+        error.statusCode = 503;
+        throw error;
+      }
+
+      await db.collection("processed_events").insertOne({
+        eventId,
+        sourceRegion,
+        processedAt: new Date()
+      }, { session });
+    });
+
+    res.json({
+      message: duplicate ? "Cambio de rol ya procesado" : "Rol administrativo sincronizado",
+      duplicate
+    });
+  } catch (error) {
+    console.error("Error replicando rol administrativo:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 503 ? error.message : "No se pudo sincronizar el rol"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
+
 // Registro de usuarios con fotografía obligatoria
 app.post("/api/auth/register", receiveAvatarFile, async (req, res) => {
   const { username, email, password } = req.body || {};
@@ -1817,6 +1920,7 @@ app.post("/api/auth/register", receiveAvatarFile, async (req, res) => {
         avatarUrl: uploadedAvatar.avatarUrl,
         avatarPublicId: uploadedAvatar.avatarPublicId,
         homeRegion: REGION,
+        role: "user",
         createdAt
       }, { session });
 
@@ -1964,6 +2068,8 @@ app.get("/api/me", authenticateToken, async (req, res) => {
       bio: user.bio || "",
       avatarUrl: user.avatarUrl || null,
       homeRegion: user.homeRegion,
+      role: user.role || "user",
+      isAdmin: user.role === "admin",
       createdAt: user.createdAt
     });
   } catch (error) {
@@ -3315,40 +3421,7 @@ app.patch("/api/conversations/:conversationId/accept", authenticateToken, async 
         throw error;
       }
 
-      const requesterId = conversation.requestedBy;
-      const mutualFollowRelations = [
-        { followerId: userId, followedId: requesterId },
-        { followerId: requesterId, followedId: userId }
-      ];
-
-      for (const relation of mutualFollowRelations) {
-        const followResult = await db.collection("follows").updateOne(
-          relation,
-          {
-            $setOnInsert: {
-              ...relation,
-              sourceRegion: REGION,
-              createdAt: acceptedAt
-            }
-          },
-          { upsert: true, session }
-        );
-
-        if (followResult.upsertedCount > 0) {
-          await db.collection("outbox").insertOne({
-            eventId: randomUUID(),
-            type: "FOLLOW_CREATED",
-            sourceRegion: REGION,
-            createdAt: acceptedAt,
-            payload: {
-              followerId: relation.followerId.toString(),
-              followedId: relation.followedId.toString(),
-              createdAt: acceptedAt
-            }
-          }, { session });
-        }
-      }
-
+      // Aceptar la conversación no crea relaciones de seguimiento.
       await db.collection("conversations").updateOne(
         { _id: conversationId },
         { $set: { status: "accepted", acceptedBy: userId, acceptedAt } },
@@ -3764,7 +3837,8 @@ async function replicatePendingEvents() {
           "MESSAGE_READ",
           "CONVERSATION_ACCEPTED",
           "CONVERSATION_CLEARED",
-          "POST_DELETED"
+          "POST_DELETED",
+          "ADMIN_ROLE_UPDATED"
         ]
       },
       deliveredAt: { $exists: false },
@@ -3779,6 +3853,11 @@ async function replicatePendingEvents() {
           "payload.userId": { $type: "string" },
           "payload.homeRegion": { $type: "string" },
           "payload.updatedAt": { $exists: true }
+        },
+        {
+          type: "ADMIN_ROLE_UPDATED",
+          "payload.userId": { $type: "string" },
+          "payload.role": { $in: ["admin", "user"] }
         },
         {
           type: "POST_DELETED",
@@ -3830,7 +3909,7 @@ async function replicatePendingEvents() {
 
       try {
         const response = await fetch(
-          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : ["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(event.type) ? "conversations" : event.type === "POST_DELETED" ? "posts" : "messages"}`,
+          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : ["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(event.type) ? "conversations" : event.type === "POST_DELETED" ? "posts" : event.type === "ADMIN_ROLE_UPDATED" ? "admins" : "messages"}`,
           {
             method: "POST",
             headers: {
@@ -3900,6 +3979,316 @@ async function replicatePendingEvents() {
     replicationRunning = false;
   }
 }
+
+// Configuración inicial: designar exactamente dos cuentas existentes como administradoras.
+// Requiere ADMIN_BOOTSTRAP_SECRET en Render. La ruta se bloquea cuando ya existe un admin.
+app.post("/api/admin/bootstrap", async (req, res) => {
+  const configuredSecret = process.env.ADMIN_BOOTSTRAP_SECRET || "";
+  const suppliedSecret = req.get("x-admin-bootstrap-key") || "";
+
+  if (!configuredSecret) {
+    return res.status(503).json({ error: "El bootstrap administrativo no está habilitado" });
+  }
+
+  const expected = Buffer.from(configuredSecret);
+  const received = Buffer.from(suppliedSecret);
+  if (
+    !suppliedSecret ||
+    expected.length !== received.length ||
+    !timingSafeEqual(expected, received)
+  ) {
+    return res.status(401).json({ error: "Clave de configuración inválida" });
+  }
+
+  try {
+    const existingAdmins = await db.collection("users").countDocuments({ role: "admin" });
+    if (existingAdmins > 0) {
+      return res.status(409).json({ error: "La configuración inicial ya fue completada" });
+    }
+
+    const usernames = Array.isArray(req.body?.usernames)
+      ? req.body.usernames.map(value => String(value || "").trim().toLowerCase())
+      : [];
+
+    if (
+      usernames.length !== 2 ||
+      usernames.some(username => !/^[a-z0-9_]{3,20}$/.test(username)) ||
+      new Set(usernames).size !== 2
+    ) {
+      return res.status(400).json({ error: "Indica dos nombres de usuario distintos y válidos" });
+    }
+
+    const admins = await db.collection("users").find({
+      username: { $in: usernames }
+    }, {
+      projection: { _id: 1, username: 1, homeRegion: 1 }
+    }).toArray();
+
+    if (admins.length !== 2) {
+      return res.status(404).json({
+        error: "No se encontraron las dos cuentas. Primero deben estar registradas en CONIG."
+      });
+    }
+
+    const session = client.startSession();
+    const updatedAt = new Date();
+    try {
+      await session.withTransaction(async () => {
+        for (const user of admins) {
+          await db.collection("users").updateOne(
+            { _id: user._id },
+            { $set: { role: "admin", roleUpdatedAt: updatedAt } },
+            { session }
+          );
+
+          await db.collection("outbox").insertOne({
+            eventId: randomUUID(),
+            type: "ADMIN_ROLE_UPDATED",
+            sourceRegion: REGION,
+            createdAt: updatedAt,
+            payload: {
+              userId: user._id.toString(),
+              role: "admin",
+              updatedAt
+            }
+          }, { session });
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    return res.status(201).json({
+      message: "Administradores iniciales configurados",
+      administrators: admins.map(user => ({
+        username: user.username,
+        homeRegion: user.homeRegion
+      }))
+    });
+  } catch (error) {
+    console.error("Error en configuración inicial de administradores:", error.message);
+    return res.status(500).json({ error: "No se pudo completar la configuración inicial" });
+  }
+});
+
+// Consulta interna firmada: devuelve únicamente métricas agregadas de la región.
+app.post("/api/replication/admin/overview", async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  const signature = req.get("x-replication-signature") || "";
+  const received = Buffer.from(signature, "hex");
+  const expected = Buffer.from(signReplicationBody(body), "hex");
+  if (
+    !/^[a-f0-9]{64}$/i.test(signature) ||
+    received.length !== expected.length ||
+    !timingSafeEqual(received, expected)
+  ) {
+    return res.status(401).json({ error: "Firma inválida" });
+  }
+
+  if (
+    typeof body.requestId !== "string" || !body.requestId ||
+    !["bogota", "cali"].includes(body.requesterRegion) ||
+    body.requesterRegion === REGION
+  ) {
+    return res.status(400).json({ error: "Consulta de métricas inválida" });
+  }
+
+  try {
+    const [postsTotal, followsTotal, conversationsTotal] = await Promise.all([
+      db.collection("posts").countDocuments({ sourceRegion: REGION }),
+      db.collection("follows").countDocuments({}),
+      db.collection("conversations").countDocuments({})
+    ]);
+
+    res.json({
+      requestId: body.requestId,
+      sourceRegion: REGION,
+      postsTotal,
+      followsTotal,
+      conversationsTotal
+    });
+  } catch (error) {
+    console.error("Error consultando métricas regionales:", error.message);
+    res.status(500).json({ error: "No se pudieron consultar las métricas regionales" });
+  }
+});
+
+// Todas las rutas siguientes exigen el rol admin almacenado en MongoDB.
+app.get("/api/admin/overview", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const [usersTotal, adminsTotal, localPosts, followsTotal, conversationsTotal] = await Promise.all([
+      db.collection("users").countDocuments({}),
+      db.collection("users").countDocuments({ role: "admin" }),
+      db.collection("posts").countDocuments({ sourceRegion: REGION }),
+      db.collection("follows").countDocuments({}),
+      db.collection("conversations").countDocuments({})
+    ]);
+
+    let peer = null;
+    let partial = false;
+    try {
+      const requestBody = { requestId: randomUUID(), requesterRegion: REGION };
+      const response = await fetch(PEER_URL + "/api/replication/admin/overview", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-replication-signature": signReplicationBody(requestBody)
+        },
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(Number(process.env.PEER_TIMEOUT_MS || 75000))
+      });
+
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      const data = await response.json();
+      if (data.requestId !== requestBody.requestId || data.sourceRegion === REGION) {
+        throw new Error("Respuesta regional inválida");
+      }
+      peer = data;
+    } catch (error) {
+      partial = true;
+      console.warn("No se pudieron consultar las métricas del nodo compañero:", error.message);
+    }
+
+    res.json({
+      region: REGION,
+      usersTotal,
+      adminsTotal,
+      postsTotal: localPosts + (peer?.postsTotal || 0),
+      postsByRegion: {
+        [REGION]: localPosts,
+        ...(peer ? { [peer.sourceRegion]: peer.postsTotal } : {})
+      },
+      followsTotal,
+      conversationsTotal,
+      partial
+    });
+  } catch (error) {
+    console.error("Error consultando panel administrativo:", error.message);
+    res.status(500).json({ error: "No se pudieron consultar las estadísticas administrativas" });
+  }
+});
+
+app.get("/api/admin/users", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim().toLowerCase();
+    const escapedSearch = [...search].map(char =>
+      "\\^$.*+?()[]{}|".includes(char) ? "\\" + char : char
+    ).join("");
+    const filter = search
+      ? {
+          $or: [
+            { username: { $regex: escapedSearch, $options: "i" } },
+            { email: { $regex: escapedSearch, $options: "i" } },
+            { displayName: { $regex: escapedSearch, $options: "i" } }
+          ]
+        }
+      : {};
+
+    const users = await db.collection("users").find(filter, {
+      projection: {
+        username: 1,
+        email: 1,
+        displayName: 1,
+        avatarUrl: 1,
+        homeRegion: 1,
+        role: 1,
+        createdAt: 1
+      }
+    }).sort({ createdAt: -1 }).limit(500).toArray();
+
+    res.json({
+      total: users.length,
+      users: users.map(user => ({
+        userId: user._id.toString(),
+        username: user.username,
+        email: user.email,
+        displayName: user.displayName || null,
+        avatarUrl: user.avatarUrl || null,
+        homeRegion: user.homeRegion,
+        role: user.role || "user",
+        createdAt: user.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error("Error consultando usuarios administrativos:", error.message);
+    res.status(500).json({ error: "No se pudo consultar la lista de usuarios" });
+  }
+});
+
+app.patch("/api/admin/users/:userId/role", authenticateToken, requireAdmin, async (req, res) => {
+  if (!ObjectId.isValid(req.params.userId)) {
+    return res.status(400).json({ error: "Identificador de usuario inválido" });
+  }
+
+  const targetId = new ObjectId(req.params.userId);
+  const role = req.body?.role;
+  if (!["admin", "user"].includes(role)) {
+    return res.status(400).json({ error: "El rol debe ser admin o user" });
+  }
+
+  if (targetId.equals(req.adminUserId)) {
+    return res.status(400).json({ error: "No puedes cambiar tu propio rol" });
+  }
+
+  const updatedAt = new Date();
+  const eventId = randomUUID();
+  const session = client.startSession();
+
+  try {
+    let target = null;
+    await session.withTransaction(async () => {
+      target = await db.collection("users").findOne({ _id: targetId }, { session });
+      if (!target) {
+        const error = new Error("No se encontró el usuario");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (role === "user" && target.role === "admin") {
+        const adminCount = await db.collection("users").countDocuments({ role: "admin" }, { session });
+        if (adminCount <= 1) {
+          const error = new Error("Debe permanecer al menos un administrador activo");
+          error.statusCode = 409;
+          throw error;
+        }
+      }
+
+      if ((target.role || "user") === role) return;
+
+      await db.collection("users").updateOne(
+        { _id: targetId },
+        { $set: { role, roleUpdatedAt: updatedAt } },
+        { session }
+      );
+
+      await db.collection("outbox").insertOne({
+        eventId,
+        type: "ADMIN_ROLE_UPDATED",
+        sourceRegion: REGION,
+        createdAt: updatedAt,
+        payload: { userId: targetId.toString(), role, updatedAt }
+      }, { session });
+    });
+
+    res.json({
+      message: role === "admin" ? "Administrador agregado correctamente" : "Permisos administrativos retirados",
+      userId: targetId.toString(),
+      role
+    });
+  } catch (error) {
+    console.error("Error actualizando rol de usuario:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "No se pudo actualizar el rol del usuario"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
 
 // Iniciar servidor
 async function startServer() {

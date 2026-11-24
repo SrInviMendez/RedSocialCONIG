@@ -544,3 +544,15 @@ body {
   height: 32px;
   padding: 4px;
 }
+
+
+/* Fase 6: panel administrativo CONIG. */
+.admin-search {
+  max-width: 360px;
+}
+#adminUsers td {
+  vertical-align: middle;
+}
+#adminUsers .badge {
+  font-weight: 600;
+}

@@ -284,6 +284,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     const currentUser = await ConigAPI.request("/api/me");
+    const adminNavLink = document.getElementById("adminNavLink");
+    if (adminNavLink) adminNavLink.classList.toggle("d-none", currentUser.isAdmin !== true);
     const isOwnProfile = !requestedUserId || requestedUserId === currentUser.id;
     viewedProfile = isOwnProfile
       ? currentUser

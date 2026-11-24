@@ -325,6 +325,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     const user = await ConigAPI.request("/api/me");
+    const adminNavLink = document.getElementById("adminNavLink");
+    if (adminNavLink) adminNavLink.classList.toggle("d-none", user.isAdmin !== true);
     document.getElementById("welcomeName").textContent = user.displayName || user.username;
 
     const homeProfileName = document.getElementById("homeProfileName");

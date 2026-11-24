@@ -1,6 +1,11 @@
 document.addEventListener("DOMContentLoaded", async () => {
   if (!ConigAPI.requireAuth()) return;
 
+  ConigAPI.request("/api/me").then(currentUser => {
+    const adminNavLink = document.getElementById("adminNavLink");
+    if (adminNavLink) adminNavLink.classList.toggle("d-none", currentUser.isAdmin !== true);
+  }).catch(() => {});
+
   const grid = document.getElementById("suggestionsGrid");
   const message = document.getElementById("suggestionsMessage");
   const moreButton = document.getElementById("suggestionsMore");
