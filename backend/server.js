@@ -623,6 +623,75 @@ app.get("/api/health", async (req, res) => {
     });
   }
 });
+
+// Consultar perfiles públicos del nodo compañero mediante una solicitud firmada.
+app.post("/api/replication/users/query", async (req, res) => {
+  const body = req.body;
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  const signature = req.get("x-replication-signature") || "";
+  if (!/^[a-f0-9]{64}$/i.test(signature)) {
+    return res.status(401).json({ error: "Firma inválida" });
+  }
+
+  const receivedSignature = Buffer.from(signature, "hex");
+  const expectedSignature = Buffer.from(signReplicationBody(body), "hex");
+  if (
+    receivedSignature.length !== expectedSignature.length ||
+    !timingSafeEqual(receivedSignature, expectedSignature)
+  ) {
+    return res.status(401).json({ error: "No se pudo validar la consulta" });
+  }
+
+  const { requestId, requesterRegion, userId } = body;
+  if (
+    typeof requestId !== "string" || !requestId ||
+    !["bogota", "cali"].includes(requesterRegion) ||
+    requesterRegion === REGION ||
+    (userId !== undefined && !ObjectId.isValid(userId))
+  ) {
+    return res.status(400).json({ error: "Datos de consulta incompletos o inválidos" });
+  }
+
+  try {
+    const filter = userId
+      ? { _id: new ObjectId(userId) }
+      : { homeRegion: REGION };
+
+    const users = await db.collection("users").find(filter, {
+      projection: {
+        username: 1,
+        displayName: 1,
+        bio: 1,
+        avatarUrl: 1,
+        homeRegion: 1,
+        createdAt: 1
+      }
+    }).sort({ createdAt: -1 }).toArray();
+
+    res.json({
+      requestId,
+      sourceRegion: REGION,
+      total: users.length,
+      users: users.map(user => ({
+        userId: user._id.toString(),
+        username: user.username,
+        displayName: user.displayName || null,
+        bio: user.bio || "",
+        avatarUrl: user.avatarUrl || null,
+        homeRegion: user.homeRegion,
+        createdAt: user.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error("Error consultando perfiles para el otro nodo:", error.message);
+    res.status(500).json({ error: "No se pudieron consultar los perfiles" });
+  }
+});
+
 // Recibir un usuario replicado desde otra región
 app.post("/api/replication/users", async (req, res) => {
   const body = req.body;
@@ -895,6 +964,7 @@ app.post("/api/replication/posts", async (req, res) => {
 
 
 // Consulta interna del fragmento local de publicaciones
+
 app.post("/api/replication/posts/query", async (req, res) => {
   const body = req.body;
 
@@ -903,67 +973,80 @@ app.post("/api/replication/posts/query", async (req, res) => {
   }
 
   const signature = req.get("x-replication-signature") || "";
-
   if (!/^[a-f0-9]{64}$/i.test(signature)) {
     return res.status(401).json({ error: "Firma inválida" });
   }
 
   const receivedSignature = Buffer.from(signature, "hex");
   const expectedSignature = Buffer.from(signReplicationBody(body), "hex");
-
   if (
     receivedSignature.length !== expectedSignature.length ||
     !timingSafeEqual(receivedSignature, expectedSignature)
   ) {
-    return res.status(401).json({
-      error: "No se pudo validar el origen de la consulta"
-    });
+    return res.status(401).json({ error: "No se pudo validar el origen de la consulta" });
   }
 
-  const { requestId, requesterRegion } = body;
-
+  const { requestId, requesterRegion, authorId } = body;
   if (
-    typeof requestId !== "string" ||
-    !requestId ||
-    typeof requesterRegion !== "string" ||
-    !requesterRegion ||
-    requesterRegion === REGION
+    typeof requestId !== "string" || !requestId ||
+    typeof requesterRegion !== "string" || !requesterRegion ||
+    requesterRegion === REGION ||
+    (authorId !== undefined && !ObjectId.isValid(authorId))
   ) {
-    return res.status(400).json({
-      error: "Datos de consulta incompletos o inválidos"
-    });
+    return res.status(400).json({ error: "Datos de consulta incompletos o inválidos" });
   }
 
   try {
+    const filter = { sourceRegion: REGION };
+    if (authorId) filter.authorId = new ObjectId(authorId);
+
     const posts = await db.collection("posts")
-      .find({ sourceRegion: REGION })
+      .find(filter)
       .sort({ createdAt: -1 })
       .limit(50)
       .toArray();
+
+    const authorIds = [...new Map(
+      posts.map(post => [post.authorId.toString(), post.authorId])
+    ).values()];
+
+    const authors = authorIds.length
+      ? await db.collection("users").find(
+          { _id: { $in: authorIds } },
+          { projection: { username: 1, displayName: 1, avatarUrl: 1 } }
+        ).toArray()
+      : [];
+
+    const authorsById = new Map(authors.map(user => [user._id.toString(), user]));
 
     res.json({
       requestId,
       sourceRegion: REGION,
       total: posts.length,
-      posts: posts.map(post => ({
-        postId: post.postId,
-        authorId: post.authorId.toString(),
-        authorRegion: post.authorRegion,
-        sourceRegion: post.sourceRegion,
-        content: post.content,
-        imageUrl: post.imageUrl || null,
-        createdAt: post.createdAt
-      }))
+      posts: posts.map(post => {
+        const author = authorsById.get(post.authorId.toString());
+        return {
+          postId: post.postId,
+          authorId: post.authorId.toString(),
+          authorRegion: post.authorRegion,
+          sourceRegion: post.sourceRegion,
+          author: author ? {
+            userId: author._id.toString(),
+            username: author.username,
+            displayName: author.displayName || null,
+            avatarUrl: author.avatarUrl || null
+          } : null,
+          content: post.content,
+          imageUrl: post.imageUrl || null,
+          createdAt: post.createdAt
+        };
+      })
     });
-
   } catch (error) {
     console.error("Error consultando fragmento local:", error.message);
-    res.status(500).json({
-      error: "No se pudo consultar el fragmento local"
-    });
+    res.status(500).json({ error: "No se pudo consultar el fragmento local" });
   }
 });
-
 
 // Recibir relaciones de seguimiento desde otra región
 app.post("/api/replication/follows", async (req, res) => {
@@ -1742,14 +1825,26 @@ app.post("/api/follows/:userId", authenticateToken, async (req, res) => {
   const createdAt = new Date();
 
   try {
-    const target = await db.collection("users").findOne(
+    let target = await db.collection("users").findOne(
       { _id: followedId },
       { projection: { _id: 1 } }
     );
 
+    // Si la copia local aún no recibió al usuario, comprobar el perfil en el otro nodo.
+    if (!target) {
+      try {
+        const remoteData = await requestPeerPublicUsers({ userId: followedId.toString() });
+        if (remoteData.users.some(user => user.userId === followedId.toString())) {
+          target = { _id: followedId };
+        }
+      } catch (error) {
+        console.warn("No se pudo comprobar el usuario remoto antes de seguirlo:", error.message);
+      }
+    }
+
     if (!target) {
       return res.status(404).json({
-        error: "El usuario que intentas seguir no existe en esta región"
+        error: "El usuario que intentas seguir no existe en la red CONIG"
       });
     }
 
@@ -1915,41 +2010,100 @@ app.get("/api/follows", authenticateToken, async (req, res) => {
 });
 
 
-// Recomendar usuarios mediante conexiones de segundo grado
-app.get("/api/recommendations", authenticateToken, async (req, res) => {
-  if (!ObjectId.isValid(req.auth.sub)) {
-    return res.status(401).json({
-      error: "Identificador de usuario inválido"
-    });
+
+// Consultas firmadas para obtener los perfiles originales del nodo compañero.
+async function requestPeerPublicUsers(options = {}) {
+  if (!PEER_URL) throw new Error("El nodo compañero no está configurado");
+
+  const requestBody = {
+    requestId: randomUUID(),
+    requesterRegion: REGION,
+    ...options
+  };
+
+  const response = await fetch(PEER_URL + "/api/replication/users/query", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-replication-signature": signReplicationBody(requestBody)
+    },
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(15000)
+  });
+
+  if (!response.ok) {
+    throw new Error("El nodo compañero respondió HTTP " + response.status);
   }
 
-  try {
-    const userId = new ObjectId(req.auth.sub);
+  const data = await response.json();
+  if (
+    data.requestId !== requestBody.requestId ||
+    typeof data.sourceRegion !== "string" ||
+    !data.sourceRegion ||
+    data.sourceRegion === REGION ||
+    !Array.isArray(data.users)
+  ) {
+    throw new Error("Respuesta inválida al consultar perfiles del nodo compañero");
+  }
 
-    const following = await db.collection("follows").find(
-      { followerId: userId },
+  return data;
+}
+
+// Construir el directorio uniendo los perfiles de ambos nodos y priorizando amigos de amigos.
+async function buildUserDirectory(currentUserId) {
+  const [localUsers, followingRows] = await Promise.all([
+    db.collection("users").find({}, {
+      projection: {
+        username: 1,
+        displayName: 1,
+        bio: 1,
+        avatarUrl: 1,
+        homeRegion: 1,
+        createdAt: 1
+      }
+    }).sort({ createdAt: -1 }).toArray(),
+    db.collection("follows").find(
+      { followerId: currentUserId },
       { projection: { followedId: 1 } }
-    ).toArray();
+    ).toArray()
+  ]);
 
-    const followedIds = following.map(item => item.followedId);
+  let remoteUsers = [];
+  let partial = false;
+  try {
+    const remoteData = await requestPeerPublicUsers();
+    remoteUsers = remoteData.users;
+  } catch (error) {
+    partial = true;
+    console.warn("Directorio: no se pudo consultar el otro nodo:", error.message);
+  }
 
-    if (followedIds.length === 0) {
-      return res.json({
-        region: REGION,
-        total: 0,
-        recommendations: []
-      });
-    }
+  const usersById = new Map();
+  for (const user of localUsers) {
+    usersById.set(user._id.toString(), {
+      userId: user._id.toString(),
+      username: user.username,
+      displayName: user.displayName || null,
+      bio: user.bio || "",
+      avatarUrl: user.avatarUrl || null,
+      homeRegion: user.homeRegion,
+      createdAt: user.createdAt
+    });
+  }
+  for (const user of remoteUsers) {
+    if (user && user.userId) usersById.set(user.userId, user);
+  }
 
-    const alreadyFollowing = new Set(
-      followedIds.map(id => id.toString())
-    );
+  const followedIds = followingRows.map(item => item.followedId);
+  const followingSet = new Set(followedIds.map(id => id.toString()));
+  const commonCounts = new Map();
 
-    const candidates = await db.collection("follows").aggregate([
+  if (followedIds.length) {
+    const secondDegree = await db.collection("follows").aggregate([
       {
         $match: {
           followerId: { $in: followedIds },
-          followedId: { $ne: userId }
+          followedId: { $ne: currentUserId }
         }
       },
       {
@@ -1957,60 +2111,194 @@ app.get("/api/recommendations", authenticateToken, async (req, res) => {
           _id: "$followedId",
           commonConnectionsCount: { $sum: 1 }
         }
-      },
-      { $sort: { commonConnectionsCount: -1 } },
-      { $limit: 50 }
+      }
     ]).toArray();
 
-    const eligible = candidates.filter(
-      item => !alreadyFollowing.has(item._id.toString())
-    );
+    for (const item of secondDegree) {
+      commonCounts.set(item._id.toString(), item.commonConnectionsCount);
+    }
+  }
 
-    const users = await db.collection("users").find(
-      { _id: { $in: eligible.map(item => item._id) } },
-      {
-        projection: {
-          username: 1,
-          displayName: 1,
-          bio: 1,
-          avatarUrl: 1,
-          homeRegion: 1
-        }
+  const users = [...usersById.values()]
+    .filter(user => user.userId !== currentUserId.toString())
+    .map(user => ({
+      ...user,
+      isFollowing: followingSet.has(user.userId),
+      commonConnectionsCount: commonCounts.get(user.userId) || 0
+    }))
+    .sort((a, b) => {
+      if (b.commonConnectionsCount !== a.commonConnectionsCount) {
+        return b.commonConnectionsCount - a.commonConnectionsCount;
       }
-    ).toArray();
+      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    });
 
-    const usersById = new Map(
-      users.map(user => [user._id.toString(), user])
-    );
+  return { users, partial };
+}
 
-    const recommendations = eligible
-      .map(item => {
-        const user = usersById.get(item._id.toString());
-        if (!user) return null;
+// Directorio global de perfiles públicos (Bogotá + Cali).
+app.get("/api/users", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
 
-        return {
-          userId: user._id.toString(),
-          username: user.username,
-          displayName: user.displayName || null,
-          bio: user.bio || "",
-          avatarUrl: user.avatarUrl || null,
-          homeRegion: user.homeRegion,
-          commonConnectionsCount: item.commonConnectionsCount
-        };
-      })
-      .filter(Boolean)
-      .slice(0, 20);
-
+  try {
+    const result = await buildUserDirectory(new ObjectId(req.auth.sub));
     res.json({
       region: REGION,
-      total: recommendations.length,
-      recommendations
+      total: result.users.length,
+      partial: result.partial,
+      users: result.users
+    });
+  } catch (error) {
+    console.error("Error consultando directorio de usuarios:", error.message);
+    res.status(500).json({ error: "No se pudo consultar el directorio de usuarios" });
+  }
+});
+
+// Consultar un perfil público por identificador.
+app.get("/api/users/:userId", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub) || !ObjectId.isValid(req.params.userId)) {
+    return res.status(400).json({ error: "Identificador de usuario inválido" });
+  }
+
+  try {
+    const targetId = new ObjectId(req.params.userId);
+    const viewerId = new ObjectId(req.auth.sub);
+    let user = await db.collection("users").findOne(
+      { _id: targetId },
+      { projection: { username: 1, displayName: 1, bio: 1, avatarUrl: 1, homeRegion: 1, createdAt: 1 } }
+    );
+
+    if (!user) {
+      try {
+        const remoteData = await requestPeerPublicUsers({ userId: targetId.toString() });
+        user = remoteData.users.find(item => item.userId === targetId.toString()) || null;
+      } catch (error) {
+        console.warn("No se pudo recuperar el perfil remoto:", error.message);
+      }
+    }
+
+    if (!user) return res.status(404).json({ error: "No se encontró el perfil solicitado" });
+
+    const [followersCount, followingCount, existingFollow] = await Promise.all([
+      db.collection("follows").countDocuments({ followedId: targetId }),
+      db.collection("follows").countDocuments({ followerId: targetId }),
+      db.collection("follows").findOne({ followerId: viewerId, followedId: targetId })
+    ]);
+
+    res.json({
+      userId: targetId.toString(),
+      username: user.username,
+      displayName: user.displayName || null,
+      bio: user.bio || "",
+      avatarUrl: user.avatarUrl || null,
+      homeRegion: user.homeRegion,
+      createdAt: user.createdAt,
+      followersCount,
+      followingCount,
+      isFollowing: Boolean(existingFollow)
+    });
+  } catch (error) {
+    console.error("Error consultando perfil público:", error.message);
+    res.status(500).json({ error: "No se pudo consultar el perfil" });
+  }
+});
+
+// Consultar las publicaciones de un perfil en los dos nodos.
+app.get("/api/users/:userId/posts", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.params.userId)) {
+    return res.status(400).json({ error: "Identificador de usuario inválido" });
+  }
+
+  try {
+    const authorId = new ObjectId(req.params.userId);
+    const localPosts = await db.collection("posts")
+      .find({ sourceRegion: REGION, authorId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .toArray();
+
+    const requestBody = {
+      requestId: randomUUID(),
+      requesterRegion: REGION,
+      authorId: authorId.toString()
+    };
+    const response = await fetch(PEER_URL + "/api/replication/posts/query", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-replication-signature": signReplicationBody(requestBody)
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(Number(process.env.PEER_TIMEOUT_MS || 75000))
+    });
+
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error("El nodo compañero respondió HTTP " + response.status + ": " + responseText.slice(0, 150));
+    }
+
+    const remoteData = await response.json();
+    if (
+      remoteData.requestId !== requestBody.requestId ||
+      typeof remoteData.sourceRegion !== "string" ||
+      !remoteData.sourceRegion ||
+      remoteData.sourceRegion === REGION ||
+      !Array.isArray(remoteData.posts) ||
+      remoteData.posts.some(post =>
+        post.sourceRegion !== remoteData.sourceRegion ||
+        post.authorId !== authorId.toString()
+      )
+    ) {
+      throw new Error("Respuesta inválida de publicaciones del perfil remoto");
+    }
+
+    const posts = [...localPosts, ...remoteData.posts]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 50);
+    const postIds = posts.map(post => post.postId);
+    const likeCounts = await db.collection("likes").aggregate([
+      { $match: { postId: { $in: postIds } } },
+      { $group: { _id: "$postId", count: { $sum: 1 } } }
+    ]).toArray();
+    const likeCountByPost = new Map(likeCounts.map(item => [item._id, item.count]));
+
+    res.json({
+      userId: authorId.toString(),
+      total: posts.length,
+      posts: posts.map(post => ({
+        postId: post.postId,
+        authorId: post.authorId.toString(),
+        content: post.content,
+        imageUrl: post.imageUrl || null,
+        likeCount: likeCountByPost.get(post.postId) || 0,
+        createdAt: post.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error("Error consultando publicaciones del perfil:", error.message);
+    res.status(503).json({ error: "No se pudieron consultar las publicaciones de ambas regiones" });
+  }
+});
+
+// Recomendaciones: primero amigos de amigos y después el resto de usuarios.
+app.get("/api/recommendations", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+
+  try {
+    const result = await buildUserDirectory(new ObjectId(req.auth.sub));
+    res.json({
+      region: REGION,
+      total: result.users.length,
+      partial: result.partial,
+      recommendations: result.users
     });
   } catch (error) {
     console.error("Error generando recomendaciones:", error.message);
-    res.status(500).json({
-      error: "No se pudieron obtener las recomendaciones"
-    });
+    res.status(500).json({ error: "No se pudieron obtener las recomendaciones" });
   }
 });
 
@@ -2108,68 +2396,60 @@ app.post("/api/posts", authenticateToken, receivePostImageFile, async (req, res)
   }
 });
 
-// Consultar las publicaciones disponibles en esta región
+
+// Consultar las publicaciones disponibles en esta región y adjuntar la identidad del autor.
 app.get("/api/posts", authenticateToken, async (req, res) => {
   try {
-    // Consultar únicamente las publicaciones originales de esta región.
     const localPosts = await db.collection("posts")
       .find({ sourceRegion: REGION })
       .sort({ createdAt: -1 })
       .limit(50)
       .toArray();
 
-    // Solicitar al nodo compañero su fragmento original.
     const requestBody = {
       requestId: randomUUID(),
       requesterRegion: REGION
     };
-
-    const response = await fetch(
-      `${PEER_URL}/api/replication/posts/query`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-replication-signature": signReplicationBody(requestBody)
-        },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(Number(process.env.PEER_TIMEOUT_MS || 75000))
-      }
-    );
+    const response = await fetch(PEER_URL + "/api/replication/posts/query", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-replication-signature": signReplicationBody(requestBody)
+      },
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(Number(process.env.PEER_TIMEOUT_MS || 75000))
+    });
 
     if (!response.ok) {
       const responseText = await response.text();
-      throw new Error(
-        `El nodo compañero respondió HTTP ${response.status}: ${responseText.slice(0, 150)}`
-      );
+      throw new Error("El nodo compañero respondió HTTP " + response.status + ": " + responseText.slice(0, 150));
     }
 
     const remoteData = await response.json();
-
     if (
       remoteData.requestId !== requestBody.requestId ||
       typeof remoteData.sourceRegion !== "string" ||
       !remoteData.sourceRegion ||
       remoteData.sourceRegion === REGION ||
       !Array.isArray(remoteData.posts) ||
-      remoteData.posts.some(post =>
-        post.sourceRegion !== remoteData.sourceRegion
-      )
+      remoteData.posts.some(post => post.sourceRegion !== remoteData.sourceRegion)
     ) {
       throw new Error("Respuesta inválida del fragmento remoto");
     }
 
     const combinedPosts = [...localPosts, ...remoteData.posts]
-      .sort((a, b) =>
-        new Date(b.createdAt).getTime() -
-        new Date(a.createdAt).getTime()
-      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 50);
 
     const currentUserId = new ObjectId(req.auth.sub);
     const postIds = combinedPosts.map(post => post.postId);
+    const authorIds = [...new Map(
+      combinedPosts
+        .filter(post => ObjectId.isValid(post.authorId.toString()))
+        .map(post => [post.authorId.toString(), new ObjectId(post.authorId.toString())])
+    ).values()];
 
-    const [likeCounts, userLikes] = await Promise.all([
+    const [likeCounts, userLikes, authors] = await Promise.all([
       db.collection("likes").aggregate([
         { $match: { postId: { $in: postIds } } },
         { $group: { _id: "$postId", count: { $sum: 1 } } }
@@ -2177,13 +2457,18 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
       db.collection("likes").find({
         postId: { $in: postIds },
         userId: currentUserId
-      }, { projection: { postId: 1 } }).toArray()
+      }, { projection: { postId: 1 } }).toArray(),
+      authorIds.length
+        ? db.collection("users").find(
+            { _id: { $in: authorIds } },
+            { projection: { username: 1, displayName: 1, avatarUrl: 1 } }
+          ).toArray()
+        : Promise.resolve([])
     ]);
 
-    const likeCountByPost = new Map(
-      likeCounts.map(item => [item._id, item.count])
-    );
+    const likeCountByPost = new Map(likeCounts.map(item => [item._id, item.count]));
     const likedPostIds = new Set(userLikes.map(item => item.postId));
+    const authorsById = new Map(authors.map(user => [user._id.toString(), user]));
 
     res.json({
       region: REGION,
@@ -2191,28 +2476,35 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
       remoteRegion: remoteData.sourceRegion,
       remoteRegionCount: remoteData.posts.length,
       total: combinedPosts.length,
-      posts: combinedPosts.map(post => ({
-        postId: post.postId,
-        authorId: post.authorId.toString(),
-        authorRegion: post.authorRegion,
-        sourceRegion: post.sourceRegion,
-        content: post.content,
-        imageUrl: post.imageUrl || null,
-        likeCount: likeCountByPost.get(post.postId) || 0,
-        likedByMe: likedPostIds.has(post.postId),
-        createdAt: post.createdAt
-      }))
-    });
+      posts: combinedPosts.map(post => {
+        const authorId = post.authorId.toString();
+        const localAuthor = authorsById.get(authorId);
+        const author = localAuthor ? {
+          userId: localAuthor._id.toString(),
+          username: localAuthor.username,
+          displayName: localAuthor.displayName || null,
+          avatarUrl: localAuthor.avatarUrl || null
+        } : (post.author || null);
 
+        return {
+          postId: post.postId,
+          authorId,
+          authorRegion: post.authorRegion,
+          sourceRegion: post.sourceRegion,
+          author,
+          content: post.content,
+          imageUrl: post.imageUrl || null,
+          likeCount: likeCountByPost.get(post.postId) || 0,
+          likedByMe: likedPostIds.has(post.postId),
+          createdAt: post.createdAt
+        };
+      })
+    });
   } catch (error) {
     console.error("Error consultando muro distribuido:", error.message);
-    res.status(503).json({
-      error: "No se pudo consultar el muro completo de ambas regiones"
-    });
+    res.status(503).json({ error: "No se pudo consultar el muro completo de ambas regiones" });
   }
 });
-
-
 
 // Dar me gusta a una publicación
 app.post("/api/likes/:postId", authenticateToken, async (req, res) => {
