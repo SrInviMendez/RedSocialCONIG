@@ -16,7 +16,7 @@ services:
     region: ohio
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    healthCheckPath: /api/health
+    healthCheckPath: /
     envVars:
       - fromGroup: conig-redsocial-shared
       - key: NODE_ENV
@@ -69,7 +69,7 @@ services:
     region: ohio
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    healthCheckPath: /api/health
+    healthCheckPath: /
     envVars:
       - fromGroup: conig-redsocial-shared
       - key: NODE_ENV
