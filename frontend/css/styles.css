@@ -386,3 +386,112 @@ body {
   color: var(--conig-primary);
   font-weight: 700;
 }
+
+
+/* Fase 4: indicadores de mensajes y solicitudes distribuidas. */
+.message-nav-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 3px;
+  border-radius: 999px;
+  background: #dc3545;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  vertical-align: middle;
+}
+.message-notifications-panel {
+  padding-top: 16px;
+  border-top: 1px solid #edf0f5;
+}
+.message-notification-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf0f5;
+}
+.message-notification-avatar,
+.conversation-avatar {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #e9edf7;
+}
+.message-notification-placeholder,
+.conversation-avatar-placeholder {
+  display: grid;
+  place-items: center;
+  color: #52627e;
+  font-weight: 800;
+}
+.message-notification-identity {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+.message-notification-identity small {
+  overflow-wrap: anywhere;
+}
+.conversation-entry-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+.conversation-entry-identity {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.conversation-entry-identity strong,
+.conversation-entry-identity small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-entry-identity small {
+  font-weight: 400;
+}
+.conversation-entry.active .conversation-entry-identity small {
+  color: #52627e !important;
+}
+.conversation-unread-count,
+.conversation-request-dot {
+  display: inline-grid;
+  place-items: center;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #3157d5;
+  color: white;
+  font-size: 11px;
+  font-weight: 800;
+}
+.conversation-request-dot {
+  background: #d97706;
+}
+.conversation-entry {
+  border-radius: 10px;
+}
+@media (max-width: 576px) {
+  .message-notification-item {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .message-notification-item .btn {
+    margin-left: 47px;
+  }
+}

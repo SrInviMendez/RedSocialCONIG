@@ -144,6 +144,64 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+
+  const messageNotificationsPanel = document.getElementById("messageNotificationsPanel");
+  const messageNotifications = document.getElementById("messageNotifications");
+  const messageNotificationsMessage = document.getElementById("messageNotificationsMessage");
+  const messageNotificationCount = document.getElementById("messageNotificationCount");
+  const messageNavBadge = document.getElementById("messageNavBadge");
+
+  async function loadMessageNotifications() {
+    if (!messageNotificationsPanel || !messageNotifications) return;
+    try {
+      const data = await ConigAPI.request("/api/message-notifications");
+      const items = data.notifications || [];
+      const total = Number(data.total) || 0;
+      if (messageNavBadge) {
+        messageNavBadge.textContent = total > 99 ? "99+" : String(total);
+        messageNavBadge.classList.toggle("d-none", total < 1);
+      }
+      messageNotificationCount.textContent = String(total);
+      messageNotificationCount.classList.toggle("d-none", total < 1);
+      messageNotifications.replaceChildren();
+      messageNotificationsPanel.classList.toggle("d-none", total < 1);
+      if (!items.length) return;
+      messageNotificationsMessage.textContent = total === 1
+        ? "Tienes una conversación pendiente."
+        : "Tienes " + total + " conversaciones pendientes.";
+
+      items.forEach(item => {
+        const participant = item.participant || {};
+        const row = element("div", "message-notification-item");
+        if (participant.avatarUrl) {
+          const avatar = element("img", "message-notification-avatar");
+          avatar.src = participant.avatarUrl;
+          avatar.alt = "Foto de " + (participant.username || "perfil");
+          avatar.loading = "lazy";
+          row.append(avatar);
+        } else {
+          row.append(element("span", "message-notification-avatar message-notification-placeholder",
+            (participant.username || "U").charAt(0).toUpperCase()));
+        }
+        const identity = element("div", "message-notification-identity");
+        const displayName = participant.displayName || participant.username || "Usuario";
+        identity.append(element("strong", "small", displayName));
+        identity.append(element("small", "text-secondary", "@" + (participant.username || "usuario") +
+          (item.pendingRequest ? " te envió una solicitud de conversación." : " te ha escrito.")));
+        row.append(identity);
+        const reply = element("button", "btn btn-sm btn-outline-primary", "Responder");
+        reply.type = "button";
+        reply.addEventListener("click", () => {
+          window.location.href = "mensajes.html?userId=" + encodeURIComponent(participant.userId);
+        });
+        row.append(reply);
+        messageNotifications.append(row);
+      });
+    } catch (error) {
+      messageNotificationsMessage.textContent = "No se pudieron actualizar las notificaciones.";
+    }
+  }
+
   async function loadPosts() {
     postsContainer.replaceChildren();
     feedMessage.textContent = "Cargando publicaciones...";
@@ -198,14 +256,26 @@ document.addEventListener("DOMContentLoaded", async () => {
         const likeButton = element("button", `btn btn-sm ${post.likedByMe ? "btn-danger" : "btn-outline-danger"}`);
         likeButton.innerHTML = `<i class="bi bi-heart${post.likedByMe ? "-fill" : ""}"></i> ${Number(post.likeCount) || 0} Me gusta`;
         likeButton.addEventListener("click", async () => {
+          const previousLiked = Boolean(post.likedByMe);
+          const previousCount = Number(post.likeCount) || 0;
+          post.likedByMe = !previousLiked;
+          post.likeCount = Math.max(0, previousCount + (post.likedByMe ? 1 : -1));
           likeButton.disabled = true;
+          likeButton.classList.toggle("btn-danger", post.likedByMe);
+          likeButton.classList.toggle("btn-outline-danger", !post.likedByMe);
+          likeButton.innerHTML = '<i class="bi bi-heart' + (post.likedByMe ? '-fill' : '') + '"></i> ' + post.likeCount + ' Me gusta';
           try {
-            await ConigAPI.request(`/api/likes/${encodeURIComponent(post.postId)}`, {
-              method: post.likedByMe ? "DELETE" : "POST"
+            await ConigAPI.request("/api/likes/" + encodeURIComponent(post.postId), {
+              method: previousLiked ? "DELETE" : "POST"
             });
-            await loadPosts();
           } catch (error) {
+            post.likedByMe = previousLiked;
+            post.likeCount = previousCount;
+            likeButton.classList.toggle("btn-danger", previousLiked);
+            likeButton.classList.toggle("btn-outline-danger", !previousLiked);
+            likeButton.innerHTML = '<i class="bi bi-heart' + (previousLiked ? '-fill' : '') + '"></i> ' + previousCount + ' Me gusta';
             alert(error.message);
+          } finally {
             likeButton.disabled = false;
           }
         });
@@ -279,4 +349,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   loadPosts();
   loadDirectoryPreview();
+  loadMessageNotifications();
+  window.setInterval(loadMessageNotifications, 3000);
 });

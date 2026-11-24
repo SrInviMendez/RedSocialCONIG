@@ -1422,7 +1422,11 @@ app.post("/api/replication/messages", async (req, res) => {
             $setOnInsert: {
               _id: conversationId,
               participantIds: [senderId, recipientId],
-              createdAt
+              createdAt,
+              status: payload.conversationStatus === "pending" ? "pending" : "accepted",
+              requestedBy: ObjectId.isValid(payload.requestedBy)
+                ? new ObjectId(payload.requestedBy)
+                : null
             },
             $max: {
               lastMessageAt: createdAt
@@ -1430,6 +1434,23 @@ app.post("/api/replication/messages", async (req, res) => {
           },
           { upsert: true, session }
         );
+
+        const incomingRequesterId = ObjectId.isValid(payload.requestedBy)
+          ? new ObjectId(payload.requestedBy)
+          : null;
+        if (payload.conversationStatus === "pending" && incomingRequesterId) {
+          const storedConversation = await db.collection("conversations").findOne(
+            { _id: conversationId }, { session }
+          );
+          if (storedConversation && storedConversation.requestedBy &&
+              !storedConversation.requestedBy.equals(incomingRequesterId)) {
+            await db.collection("conversations").updateOne(
+              { _id: conversationId },
+              { $set: { status: "pending", requestedBy: incomingRequesterId } },
+              { session }
+            );
+          }
+        }
 
         await db.collection("messages").updateOne(
           { messageId: payload.messageId },
@@ -1538,6 +1559,108 @@ app.post("/api/replication/messages", async (req, res) => {
     await session.endSession();
   }
 });
+
+
+// Replicar aceptación de solicitudes y borrado individual de conversaciones.
+app.post("/api/replication/conversations", async (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return res.status(400).json({ error: "Solicitud inválida" });
+  }
+
+  const signature = req.get("x-replication-signature") || "";
+  if (!/^[a-f0-9]{64}$/i.test(signature)) {
+    return res.status(401).json({ error: "Firma inválida" });
+  }
+  const receivedSignature = Buffer.from(signature, "hex");
+  const expectedSignature = Buffer.from(signReplicationBody(body), "hex");
+  if (receivedSignature.length !== expectedSignature.length ||
+      !timingSafeEqual(receivedSignature, expectedSignature)) {
+    return res.status(401).json({ error: "No se pudo validar el origen del evento" });
+  }
+
+  const { eventId, type, sourceRegion, payload } = body;
+  const actorField = type === "CONVERSATION_ACCEPTED" ? "acceptedBy" : "userId";
+  if (typeof eventId !== "string" || !eventId ||
+      !["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(type) ||
+      typeof sourceRegion !== "string" || !sourceRegion || sourceRegion === REGION ||
+      !payload || typeof payload.conversationId !== "string" ||
+      !ObjectId.isValid(payload[actorField])) {
+    return res.status(400).json({ error: "Datos de conversación incompletos o inválidos" });
+  }
+
+  const actorId = new ObjectId(payload[actorField]);
+  const eventDate = new Date(type === "CONVERSATION_ACCEPTED" ? payload.acceptedAt : payload.clearedAt);
+  if (Number.isNaN(eventDate.getTime())) {
+    return res.status(400).json({ error: "Fecha de conversación inválida" });
+  }
+
+  const session = client.startSession();
+  let duplicate = false;
+  try {
+    await session.withTransaction(async () => {
+      const processed = await db.collection("processed_events").findOne({ eventId }, { session });
+      if (processed) {
+        duplicate = true;
+        return;
+      }
+
+      const conversation = await db.collection("conversations").findOne(
+        { _id: payload.conversationId, participantIds: actorId },
+        { session }
+      );
+      if (!conversation) {
+        const error = new Error("La conversación todavía no está disponible en esta región");
+        error.statusCode = 503;
+        throw error;
+      }
+
+      if (type === "CONVERSATION_ACCEPTED") {
+        await db.collection("conversations").updateOne(
+          { _id: payload.conversationId, participantIds: actorId },
+          { $set: { status: "accepted", acceptedBy: actorId, acceptedAt: eventDate } },
+          { session }
+        );
+      } else {
+        const currentMarker = (conversation.clearedBy || []).find(item =>
+          item.userId && item.userId.equals(actorId)
+        );
+        if (currentMarker) {
+          await db.collection("conversations").updateOne(
+            { _id: payload.conversationId, "clearedBy.userId": actorId },
+            { $set: { "clearedBy.$.clearedAt": eventDate } },
+            { session }
+          );
+        } else {
+          await db.collection("conversations").updateOne(
+            { _id: payload.conversationId },
+            { $push: { clearedBy: { userId: actorId, clearedAt: eventDate } } },
+            { session }
+          );
+        }
+      }
+
+      await db.collection("processed_events").insertOne({
+        eventId,
+        sourceRegion,
+        processedAt: new Date()
+      }, { session });
+    });
+
+    res.json({
+      message: duplicate ? "Evento de conversación ya procesado" : "Conversación sincronizada",
+      duplicate
+    });
+  } catch (error) {
+    console.error("Error recibiendo evento de conversación:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 503 ? error.message : "No se pudo sincronizar la conversación"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
 
 // Registro de usuarios con fotografía obligatoria
 app.post("/api/auth/register", receiveAvatarFile, async (req, res) => {
@@ -2102,6 +2225,57 @@ app.get("/api/follows", authenticateToken, async (req, res) => {
   }
 });
 
+
+
+
+// Obtener los perfiles de las personas que sigue el usuario, incluyendo ambas regiones.
+app.get("/api/follows/following-users", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+
+  try {
+    const userId = new ObjectId(req.auth.sub);
+    const relations = await db.collection("follows").find(
+      { followerId: userId },
+      { projection: { followedId: 1 } }
+    ).toArray();
+    const followedIds = relations.map(item => item.followedId);
+    if (!followedIds.length) {
+      return res.json({ total: 0, users: [], partial: false });
+    }
+
+    const localUsers = await db.collection("users").find(
+      { _id: { $in: followedIds } },
+      { projection: { username: 1, displayName: 1, avatarUrl: 1, homeRegion: 1 } }
+    ).toArray();
+    const usersById = new Map(localUsers.map(user => [user._id.toString(), {
+      userId: user._id.toString(),
+      username: user.username,
+      displayName: user.displayName || null,
+      avatarUrl: user.avatarUrl || null,
+      homeRegion: user.homeRegion
+    }]));
+
+    let partial = false;
+    try {
+      const remote = await requestPeerPublicUsers();
+      const followedSet = new Set(followedIds.map(id => id.toString()));
+      for (const person of remote.users || []) {
+        if (followedSet.has(person.userId)) usersById.set(person.userId, person);
+      }
+    } catch (error) {
+      partial = true;
+      console.warn("No se pudieron consultar todos los perfiles seguidos:", error.message);
+    }
+
+    const users = followedIds.map(id => usersById.get(id.toString())).filter(Boolean);
+    res.json({ total: users.length, users, partial });
+  } catch (error) {
+    console.error("Error consultando personas seguidas:", error.message);
+    res.status(500).json({ error: "No se pudieron consultar las personas que sigues" });
+  }
+});
 
 
 // Consultas firmadas para obtener los perfiles originales del nodo compañero.
@@ -2721,76 +2895,96 @@ app.delete("/api/likes/:postId", authenticateToken, async (req, res) => {
   }
 });
 
-// Enviar un mensaje privado a otro usuario
+// Enviar un mensaje privado. Si no existe seguimiento mutuo, crea una solicitud.
 app.post("/api/messages/:userId", authenticateToken, async (req, res) => {
-  if (
-    !ObjectId.isValid(req.auth.sub) ||
-    !ObjectId.isValid(req.params.userId)
-  ) {
+  if (!ObjectId.isValid(req.auth.sub) || !ObjectId.isValid(req.params.userId)) {
     return res.status(400).json({ error: "Identificador inválido" });
   }
 
-  const content = typeof req.body.content === "string"
-    ? req.body.content.trim()
-    : "";
-
+  const content = typeof req.body.content === "string" ? req.body.content.trim() : "";
   if (content.length < 1 || content.length > 2000) {
-    return res.status(400).json({
-      error: "El mensaje debe tener entre 1 y 2000 caracteres"
-    });
+    return res.status(400).json({ error: "El mensaje debe tener entre 1 y 2000 caracteres" });
   }
 
   const senderId = new ObjectId(req.auth.sub);
   const recipientId = new ObjectId(req.params.userId);
-
   if (senderId.equals(recipientId)) {
-    return res.status(400).json({
-      error: "No puedes enviarte mensajes a ti mismo"
-    });
+    return res.status(400).json({ error: "No puedes enviarte mensajes a ti mismo" });
   }
 
   const recipient = await db.collection("users").findOne(
     { _id: recipientId },
     { projection: { _id: 1, username: 1 } }
   );
-
-  if (!recipient) {
-    return res.status(404).json({
-      error: "No se encontró el destinatario en esta región"
-    });
-  }
+  if (!recipient) return res.status(404).json({ error: "No se encontró el destinatario en esta región" });
 
   const sender = await db.collection("users").findOne(
     { _id: senderId },
-    { projection: { username: 1 } }
+    { projection: { _id: 1, username: 1 } }
   );
-
-  if (!sender) {
-    return res.status(404).json({
-      error: "No se encontró el remitente"
-    });
-  }
+  if (!sender) return res.status(404).json({ error: "No se encontró el remitente" });
 
   const conversationId = buildConversationId(senderId, recipientId);
   const messageId = randomUUID();
   const eventId = randomUUID();
   const createdAt = new Date();
   const session = client.startSession();
+  let conversationStatus = "accepted";
+  let requestedBy = null;
+  let resetPendingRequest = false;
 
   try {
     await session.withTransaction(async () => {
+      const existingConversation = await db.collection("conversations").findOne(
+        { _id: conversationId },
+        { session }
+      );
+
+      if (existingConversation) {
+        conversationStatus = existingConversation.status || "accepted";
+        requestedBy = existingConversation.requestedBy || null;
+        if (conversationStatus === "pending" && requestedBy && !requestedBy.equals(senderId)) {
+          const clearedMarker = (existingConversation.clearedBy || []).find(item =>
+            item.userId && item.userId.equals(senderId)
+          );
+          const clearedAfterLastMessage = clearedMarker && clearedMarker.clearedAt &&
+            new Date(clearedMarker.clearedAt).getTime() >= new Date(existingConversation.lastMessageAt || existingConversation.createdAt).getTime();
+          if (clearedAfterLastMessage) {
+            resetPendingRequest = true;
+            requestedBy = senderId;
+          } else {
+            const error = new Error("Debes esperar a que la otra persona acepte la solicitud de conversación.");
+            error.statusCode = 403;
+            throw error;
+          }
+        }
+      } else {
+        const senderFollowsRecipient = await db.collection("follows").findOne(
+          { followerId: senderId, followedId: recipientId }, { session }
+        );
+        const recipientFollowsSender = await db.collection("follows").findOne(
+          { followerId: recipientId, followedId: senderId }, { session }
+        );
+        conversationStatus = senderFollowsRecipient && recipientFollowsSender ? "accepted" : "pending";
+        requestedBy = conversationStatus === "pending" ? senderId : null;
+      }
+
+      const conversationUpdate = {
+        $setOnInsert: {
+          _id: conversationId,
+          participantIds: [senderId, recipientId],
+          createdAt,
+          status: conversationStatus,
+          requestedBy
+        },
+        $max: { lastMessageAt: createdAt }
+      };
+      if (resetPendingRequest) {
+        conversationUpdate.$set = { status: "pending", requestedBy: senderId };
+      }
       await db.collection("conversations").updateOne(
         { _id: conversationId },
-        {
-          $setOnInsert: {
-            _id: conversationId,
-            participantIds: [senderId, recipientId],
-            createdAt
-          },
-          $max: {
-            lastMessageAt: createdAt
-          }
-        },
+        conversationUpdate,
         { upsert: true, session }
       );
 
@@ -2819,13 +3013,17 @@ app.post("/api/messages/:userId", authenticateToken, async (req, res) => {
           recipientId: recipientId.toString(),
           senderRegion: REGION,
           content,
-          createdAt
+          createdAt,
+          conversationStatus,
+          requestedBy: requestedBy ? requestedBy.toString() : null
         }
       }, { session });
     });
 
     res.status(201).json({
-      message: "Mensaje enviado correctamente",
+      message: conversationStatus === "pending"
+        ? "Solicitud de conversación enviada"
+        : "Mensaje enviado correctamente",
       data: {
         messageId,
         conversationId,
@@ -2834,249 +3032,378 @@ app.post("/api/messages/:userId", authenticateToken, async (req, res) => {
         recipientUsername: recipient.username,
         content,
         deliveryStatus: "sent",
+        status: conversationStatus,
+        requestedBy: requestedBy ? requestedBy.toString() : null,
         createdAt
       }
     });
-
   } catch (error) {
     console.error("Error enviando mensaje:", error.message);
-    res.status(500).json({
-      error: "No se pudo enviar el mensaje"
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 403 ? error.message : "No se pudo enviar el mensaje"
     });
   } finally {
     await session.endSession();
   }
 });
 
-
-// Consultar las conversaciones del usuario autenticado
+// Consultar conversaciones con foto, estado, mensajes sin leer y borrado individual.
 app.get("/api/conversations", authenticateToken, async (req, res) => {
   try {
     if (!ObjectId.isValid(req.auth.sub)) {
-      return res.status(401).json({
-        error: "Identificador de usuario inválido"
-      });
+      return res.status(401).json({ error: "Identificador de usuario inválido" });
     }
-
     const userId = new ObjectId(req.auth.sub);
-
     const conversations = await db.collection("conversations")
       .find({ participantIds: userId })
       .sort({ lastMessageAt: -1 })
-      .limit(50)
+      .limit(100)
       .toArray();
 
-    const result = await Promise.all(conversations.map(async conversation => {
-      const otherId = conversation.participantIds.find(
-        id => !id.equals(userId)
-      );
-
-      const otherUser = otherId
-        ? await db.collection("users").findOne(
-            { _id: otherId },
-            { projection: { username: 1, homeRegion: 1 } }
-          )
-        : null;
-
-      const lastMessage = await db.collection("messages").findOne(
-        { conversationId: conversation._id },
-        { sort: { createdAt: -1 } }
-      );
-
+    const mapped = await Promise.all(conversations.map(async conversation => {
+      const otherId = conversation.participantIds.find(id => !id.equals(userId));
+      const otherUser = otherId ? await db.collection("users").findOne(
+        { _id: otherId },
+        { projection: { username: 1, displayName: 1, avatarUrl: 1, homeRegion: 1 } }
+      ) : null;
+      const marker = (conversation.clearedBy || []).find(item => item.userId && item.userId.equals(userId));
+      const visibleFilter = { conversationId: conversation._id };
+      if (marker && marker.clearedAt) visibleFilter.createdAt = { $gt: marker.clearedAt };
+      const [lastMessage, unreadCount] = await Promise.all([
+        db.collection("messages").findOne(visibleFilter, { sort: { createdAt: -1 } }),
+        db.collection("messages").countDocuments({
+          ...visibleFilter,
+          recipientId: userId,
+          deliveryStatus: { $ne: "read" }
+        })
+      ]);
+      if (!lastMessage) return null;
       return {
         conversationId: conversation._id,
         participant: otherUser ? {
           userId: otherId.toString(),
           username: otherUser.username,
+          displayName: otherUser.displayName || null,
+          avatarUrl: otherUser.avatarUrl || null,
           homeRegion: otherUser.homeRegion
         } : null,
-        lastMessage: lastMessage ? {
+        lastMessage: {
           messageId: lastMessage.messageId,
           senderId: lastMessage.senderId.toString(),
           content: lastMessage.content,
           deliveryStatus: lastMessage.deliveryStatus,
           createdAt: lastMessage.createdAt
-        } : null,
+        },
+        status: conversation.status || "accepted",
+        requestedBy: conversation.requestedBy ? conversation.requestedBy.toString() : null,
+        unreadCount,
         lastMessageAt: conversation.lastMessageAt || conversation.createdAt
       };
     }));
 
+    const result = mapped.filter(Boolean);
     res.json({
       region: REGION,
       total: result.length,
+      unreadTotal: result.reduce((sum, item) => sum + item.unreadCount, 0),
       conversations: result
     });
-
   } catch (error) {
     console.error("Error consultando conversaciones:", error.message);
-    res.status(500).json({
-      error: "No se pudieron consultar las conversaciones"
-    });
+    res.status(500).json({ error: "No se pudieron consultar las conversaciones" });
   }
 });
 
-
-// Consultar el historial privado de una conversación
-app.get(
-  "/api/conversations/:conversationId/messages",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      if (!ObjectId.isValid(req.auth.sub)) {
-        return res.status(401).json({
-          error: "Identificador de usuario inválido"
-        });
-      }
-
-      const userId = new ObjectId(req.auth.sub);
-      const conversationId = req.params.conversationId;
-
-      const conversation = await db.collection("conversations").findOne({
-        _id: conversationId,
-        participantIds: userId
-      });
-
-      if (!conversation) {
-        return res.status(404).json({
-          error: "Conversación inexistente o no tienes permiso para verla"
-        });
-      }
-
-      const requestedLimit = Number.parseInt(req.query.limit, 10);
-      const limit = Number.isInteger(requestedLimit)
-        ? Math.max(1, Math.min(requestedLimit, 100))
-        : 50;
-
-      const messages = await db.collection("messages")
-        .find({ conversationId })
-        .sort({ createdAt: -1 })
-        .limit(limit)
-        .toArray();
-
-      res.json({
-        conversationId,
-        region: REGION,
-        total: messages.length,
-        messages: messages.reverse().map(message => ({
-          messageId: message.messageId,
-          senderId: message.senderId.toString(),
-          recipientId: message.recipientId.toString(),
-          content: message.content,
-          deliveryStatus: message.deliveryStatus,
-          createdAt: message.createdAt,
-          deliveredAt: message.deliveredAt,
-          readAt: message.readAt
-        }))
-      });
-
-    } catch (error) {
-      console.error("Error consultando historial:", error.message);
-      res.status(500).json({
-        error: "No se pudo consultar el historial"
-      });
-    }
-  }
-);
-
-
-// Marcar un mensaje recibido como leído
-app.patch(
-  "/api/messages/:messageId/read",
-  authenticateToken,
-  async (req, res) => {
+// Consultar el historial privado, respetando la fecha de borrado individual.
+app.get("/api/conversations/:conversationId/messages", authenticateToken, async (req, res) => {
+  try {
     if (!ObjectId.isValid(req.auth.sub)) {
-      return res.status(401).json({
-        error: "Identificador de usuario inválido"
-      });
+      return res.status(401).json({ error: "Identificador de usuario inválido" });
+    }
+    const userId = new ObjectId(req.auth.sub);
+    const conversationId = req.params.conversationId;
+    const conversation = await db.collection("conversations").findOne({
+      _id: conversationId,
+      participantIds: userId
+    });
+    if (!conversation) {
+      return res.status(404).json({ error: "Conversación inexistente o no tienes permiso para verla" });
     }
 
-    const recipientId = new ObjectId(req.auth.sub);
-    const messageId = req.params.messageId;
-    const eventId = randomUUID();
-    const readAt = new Date();
-    const session = client.startSession();
+    const marker = (conversation.clearedBy || []).find(item => item.userId && item.userId.equals(userId));
+    const filter = { conversationId };
+    if (marker && marker.clearedAt) filter.createdAt = { $gt: marker.clearedAt };
+    const requestedLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 100)) : 50;
+    const messages = await db.collection("messages").find(filter)
+      .sort({ createdAt: -1 }).limit(limit).toArray();
 
-    let message;
-    let alreadyRead = false;
+    res.json({
+      conversationId,
+      region: REGION,
+      total: messages.length,
+      status: conversation.status || "accepted",
+      requestedBy: conversation.requestedBy ? conversation.requestedBy.toString() : null,
+      messages: messages.reverse().map(message => ({
+        messageId: message.messageId,
+        senderId: message.senderId.toString(),
+        recipientId: message.recipientId.toString(),
+        content: message.content,
+        deliveryStatus: message.deliveryStatus,
+        createdAt: message.createdAt,
+        deliveredAt: message.deliveredAt,
+        readAt: message.readAt
+      }))
+    });
+  } catch (error) {
+    console.error("Error consultando historial:", error.message);
+    res.status(500).json({ error: "No se pudo consultar el historial" });
+  }
+});
 
-    try {
-      await session.withTransaction(async () => {
-        message = await db.collection("messages").findOne(
-          { messageId, recipientId },
-          { session }
-        );
+// Aceptar una solicitud recibida. Solo puede aceptarla la persona destinataria.
+app.patch("/api/conversations/:conversationId/accept", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+  const userId = new ObjectId(req.auth.sub);
+  const conversationId = req.params.conversationId;
+  const acceptedAt = new Date();
+  const eventId = randomUUID();
+  const session = client.startSession();
+  let alreadyAccepted = false;
 
-        if (!message) {
-          return;
-        }
-
-        if (message.deliveryStatus === "read") {
-          alreadyRead = true;
-          return;
-        }
-
-        if (!message.deliveredAt) {
-          const error = new Error("El mensaje todavía no está entregado");
-          error.statusCode = 409;
-          throw error;
-        }
-
-        await db.collection("messages").updateOne(
-          { messageId, recipientId },
-          {
-            $set: {
-              deliveryStatus: "read",
-              readAt
-            }
-          },
-          { session }
-        );
-
-        await db.collection("outbox").insertOne({
-          eventId,
-          type: "MESSAGE_READ",
-          sourceRegion: REGION,
-          createdAt: readAt,
-          payload: {
-            messageId,
-            conversationId: message.conversationId,
-            senderId: message.senderId.toString(),
-            recipientId: recipientId.toString(),
-            deliveredAt: message.deliveredAt,
-            readAt
-          }
-        }, { session });
-      });
-
-      if (!message) {
-        return res.status(404).json({
-          error: "No se encontró un mensaje recibido por este usuario"
-        });
+  try {
+    await session.withTransaction(async () => {
+      const conversation = await db.collection("conversations").findOne(
+        { _id: conversationId, participantIds: userId }, { session }
+      );
+      if (!conversation) {
+        const error = new Error("No se encontró la solicitud de conversación");
+        error.statusCode = 404;
+        throw error;
+      }
+      if ((conversation.status || "accepted") === "accepted") {
+        alreadyAccepted = true;
+        return;
+      }
+      if (!conversation.requestedBy || conversation.requestedBy.equals(userId)) {
+        const error = new Error("Solo la persona que recibió la solicitud puede aceptarla");
+        error.statusCode = 403;
+        throw error;
       }
 
-      res.json({
-        message: alreadyRead
-          ? "El mensaje ya estaba marcado como leído"
-          : "Mensaje marcado como leído",
-        messageId,
-        deliveryStatus: "read",
-        readAt: message.readAt || readAt
-      });
+      await db.collection("conversations").updateOne(
+        { _id: conversationId },
+        { $set: { status: "accepted", acceptedBy: userId, acceptedAt } },
+        { session }
+      );
+      await db.collection("outbox").insertOne({
+        eventId,
+        type: "CONVERSATION_ACCEPTED",
+        sourceRegion: REGION,
+        createdAt: acceptedAt,
+        payload: { conversationId, acceptedBy: userId.toString(), acceptedAt }
+      }, { session });
+    });
 
-    } catch (error) {
-      console.error("Error marcando mensaje como leído:", error.message);
-      res.status(error.statusCode || 500).json({
-        error: error.statusCode === 409
-          ? error.message
-          : "No se pudo marcar el mensaje como leído"
-      });
-    } finally {
-      await session.endSession();
-    }
+    res.json({
+      message: alreadyAccepted ? "La conversación ya estaba aceptada" : "Conversación aceptada",
+      status: "accepted"
+    });
+  } catch (error) {
+    console.error("Error aceptando conversación:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "No se pudo aceptar la conversación"
+    });
+  } finally {
+    await session.endSession();
   }
-);
+});
 
+// Borrar el chat solo para la persona que realiza la acción.
+app.delete("/api/conversations/:conversationId", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+  const userId = new ObjectId(req.auth.sub);
+  const conversationId = req.params.conversationId;
+  const clearedAt = new Date();
+  const eventId = randomUUID();
+  const session = client.startSession();
 
+  try {
+    await session.withTransaction(async () => {
+      const conversation = await db.collection("conversations").findOne(
+        { _id: conversationId, participantIds: userId }, { session }
+      );
+      if (!conversation) {
+        const error = new Error("No se encontró la conversación");
+        error.statusCode = 404;
+        throw error;
+      }
+      const marker = (conversation.clearedBy || []).find(item => item.userId && item.userId.equals(userId));
+      if (marker) {
+        await db.collection("conversations").updateOne(
+          { _id: conversationId, "clearedBy.userId": userId },
+          { $set: { "clearedBy.$.clearedAt": clearedAt } },
+          { session }
+        );
+      } else {
+        await db.collection("conversations").updateOne(
+          { _id: conversationId },
+          { $push: { clearedBy: { userId, clearedAt } } },
+          { session }
+        );
+      }
+      await db.collection("outbox").insertOne({
+        eventId,
+        type: "CONVERSATION_CLEARED",
+        sourceRegion: REGION,
+        createdAt: clearedAt,
+        payload: { conversationId, userId: userId.toString(), clearedAt }
+      }, { session });
+    });
+
+    res.json({ message: "Chat borrado para tu cuenta" });
+  } catch (error) {
+    console.error("Error borrando chat:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "No se pudo borrar el chat"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
+
+// Notificaciones de mensajes no leídos y solicitudes de conversación pendientes.
+app.get("/api/message-notifications", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+  try {
+    const userId = new ObjectId(req.auth.sub);
+    const conversations = await db.collection("conversations").find({ participantIds: userId })
+      .sort({ lastMessageAt: -1 }).limit(100).toArray();
+    const notifications = [];
+
+    for (const conversation of conversations) {
+      const marker = (conversation.clearedBy || []).find(item => item.userId && item.userId.equals(userId));
+      const unreadFilter = {
+        conversationId: conversation._id,
+        recipientId: userId,
+        deliveryStatus: { $ne: "read" }
+      };
+      if (marker && marker.clearedAt) unreadFilter.createdAt = { $gt: marker.clearedAt };
+      const visibleMessageFilter = { conversationId: conversation._id };
+      if (marker && marker.clearedAt) visibleMessageFilter.createdAt = { $gt: marker.clearedAt };
+      const [lastVisibleMessage, unreadMessage, unreadCount] = await Promise.all([
+        db.collection("messages").findOne(visibleMessageFilter, { sort: { createdAt: -1 } }),
+        db.collection("messages").findOne(unreadFilter, { sort: { createdAt: -1 } }),
+        db.collection("messages").countDocuments(unreadFilter)
+      ]);
+      const pendingRequest = (conversation.status || "accepted") === "pending" &&
+        conversation.requestedBy && !conversation.requestedBy.equals(userId) &&
+        lastVisibleMessage && lastVisibleMessage.senderId.equals(conversation.requestedBy);
+      if (!unreadCount && !pendingRequest) continue;
+
+      const actorId = pendingRequest
+        ? conversation.requestedBy
+        : (unreadMessage ? unreadMessage.senderId : null);
+      if (!actorId) continue;
+      const actor = await db.collection("users").findOne(
+        { _id: actorId },
+        { projection: { username: 1, displayName: 1, avatarUrl: 1 } }
+      );
+      if (!actor) continue;
+      notifications.push({
+        conversationId: conversation._id,
+        participant: {
+          userId: actorId.toString(),
+          username: actor.username,
+          displayName: actor.displayName || null,
+          avatarUrl: actor.avatarUrl || null
+        },
+        pendingRequest: Boolean(pendingRequest),
+        unreadCount,
+        createdAt: unreadMessage ? unreadMessage.createdAt : conversation.createdAt
+      });
+    }
+
+    res.json({
+      total: notifications.length,
+      unreadTotal: notifications.reduce((sum, item) => sum + item.unreadCount, 0),
+      notifications
+    });
+  } catch (error) {
+    console.error("Error consultando notificaciones de mensajes:", error.message);
+    res.status(500).json({ error: "No se pudieron consultar las notificaciones" });
+  }
+});
+
+// Marcar un mensaje recibido como leído. Se ejecuta automáticamente al abrir el chat.
+app.patch("/api/messages/:messageId/read", authenticateToken, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+  const recipientId = new ObjectId(req.auth.sub);
+  const messageId = req.params.messageId;
+  const eventId = randomUUID();
+  const readAt = new Date();
+  const session = client.startSession();
+  let message;
+  let alreadyRead = false;
+
+  try {
+    await session.withTransaction(async () => {
+      message = await db.collection("messages").findOne({ messageId, recipientId }, { session });
+      if (!message) return;
+      if (message.deliveryStatus === "read") {
+        alreadyRead = true;
+        return;
+      }
+      if (!message.deliveredAt) {
+        const error = new Error("El mensaje todavía no está entregado");
+        error.statusCode = 409;
+        throw error;
+      }
+      await db.collection("messages").updateOne(
+        { messageId, recipientId },
+        { $set: { deliveryStatus: "read", readAt } },
+        { session }
+      );
+      await db.collection("outbox").insertOne({
+        eventId,
+        type: "MESSAGE_READ",
+        sourceRegion: REGION,
+        createdAt: readAt,
+        payload: {
+          messageId,
+          conversationId: message.conversationId,
+          senderId: message.senderId.toString(),
+          recipientId: recipientId.toString(),
+          deliveredAt: message.deliveredAt,
+          readAt
+        }
+      }, { session });
+    });
+
+    if (!message) return res.status(404).json({ error: "No se encontró un mensaje recibido por este usuario" });
+    res.json({
+      message: alreadyRead ? "El mensaje ya estaba marcado como leído" : "Mensaje marcado como leído",
+      messageId,
+      deliveryStatus: "read",
+      readAt: message.readAt || readAt
+    });
+  } catch (error) {
+    console.error("Error marcando mensaje como leído:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 409 ? error.message : "No se pudo marcar el mensaje como leído"
+    });
+  } finally {
+    await session.endSession();
+  }
+});
 
 // Enviar eventos de auditoría a MongoDB Atlas.
 // Este proceso es independiente de la replicación entre regiones.
@@ -3278,7 +3605,9 @@ async function replicatePendingEvents() {
           "LIKE_DELETED",
           "MESSAGE_SENT",
           "MESSAGE_DELIVERED",
-          "MESSAGE_READ"
+          "MESSAGE_READ",
+          "CONVERSATION_ACCEPTED",
+          "CONVERSATION_CLEARED"
         ]
       },
       deliveredAt: { $exists: false },
@@ -3312,6 +3641,16 @@ async function replicatePendingEvents() {
           "payload.conversationId": { $type: "string" },
           "payload.senderId": { $type: "string" },
           "payload.recipientId": { $type: "string" }
+        },
+        {
+          type: "CONVERSATION_ACCEPTED",
+          "payload.conversationId": { $type: "string" },
+          "payload.acceptedBy": { $type: "string" }
+        },
+        {
+          type: "CONVERSATION_CLEARED",
+          "payload.conversationId": { $type: "string" },
+          "payload.userId": { $type: "string" }
         }
       ]
     })
@@ -3329,7 +3668,7 @@ async function replicatePendingEvents() {
 
       try {
         const response = await fetch(
-          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : "messages"}`,
+          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : ["CONVERSATION_ACCEPTED", "CONVERSATION_CLEARED"].includes(event.type) ? "conversations" : "messages"}`,
           {
             method: "POST",
             headers: {
