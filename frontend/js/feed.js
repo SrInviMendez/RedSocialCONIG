@@ -208,7 +208,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     try {
       const result = await ConigAPI.request("/api/posts");
-      feedMessage.textContent = `${result.total} publicaciones en tu comunidad`;
+      if (result.partial) {
+        const names = { bogota: "Bogotá", cali: "Cali" };
+        const available = names[result.region] || result.region || "esta región";
+        const unavailable = names[result.unavailableRegion] || "la otra región";
+        feedMessage.textContent = `${result.total} publicaciones disponibles. Mostrando ${available}; ${unavailable} no está disponible temporalmente.`;
+      } else {
+        feedMessage.textContent = `${result.total} publicaciones en tu comunidad`;
+      }
 
       if (!result.posts.length) {
         postsContainer.append(element("div", "alert alert-light", "Todavía no hay publicaciones."));

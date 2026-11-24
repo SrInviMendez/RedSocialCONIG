@@ -285,6 +285,47 @@ function forwardToPeer(req, res) {
   });
 }
 
+// FALLBACK_NODOS_CONIG: disponibilidad breve del nodo compañero para evitar
+// redirigir sesiones a un backend caído. No modifica datos ni credenciales.
+const peerHealthCache = { checkedAt: 0, available: false, pending: null };
+
+async function isPeerAvailable() {
+  if (!PEER_URL) return false;
+
+  const cacheMs = Math.max(250, Number(process.env.PEER_HEALTH_CACHE_MS || 1000));
+  if (peerHealthCache.pending) return peerHealthCache.pending;
+  if (Date.now() - peerHealthCache.checkedAt < cacheMs) {
+    return peerHealthCache.available;
+  }
+
+  peerHealthCache.pending = (async () => {
+    let available = false;
+    try {
+      const response = await fetch(PEER_URL + "/api/health", {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(Number(process.env.PEER_HEALTH_TIMEOUT_MS || 2500))
+      });
+      if (response.ok) {
+        const health = await response.json();
+        available = health.status === 'active' && health.mongodb === 'connected';
+      }
+    } catch (error) {
+      console.warn('Nodo compañero no disponible; se atenderá desde el nodo local:', error.message);
+    }
+
+    peerHealthCache.available = available;
+    peerHealthCache.checkedAt = Date.now();
+    return available;
+  })();
+
+  try {
+    return await peerHealthCache.pending;
+  } finally {
+    peerHealthCache.pending = null;
+  }
+}
+
+
 async function readLoginBody(req) {
   const chunks = [];
   let size = 0;
@@ -493,7 +534,16 @@ app.use(async (req, res, next) => {
             ["bogota", "cali"].includes(claims.homeRegion) &&
             claims.homeRegion !== REGION
           ) {
-            return forwardToPeer(req, res);
+            if (await isPeerAvailable()) {
+              return forwardToPeer(req, res);
+            }
+
+            // Modo degradado: el usuario puede seguir usando la copia local
+            // mientras su región de origen está desconectada.
+            console.warn(
+              `Sesión de ${claims.homeRegion} atendida temporalmente por ${REGION}`
+            );
+            return next();
           }
         } catch {
           // La ruta original verificará el token y responderá 401.
@@ -2834,35 +2884,55 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
       .limit(50)
       .toArray();
 
-    const requestBody = {
-      requestId: randomUUID(),
-      requesterRegion: REGION
-    };
-    const response = await fetch(PEER_URL + "/api/replication/posts/query", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-replication-signature": signReplicationBody(requestBody)
-      },
-      body: JSON.stringify(requestBody),
-      signal: AbortSignal.timeout(Number(process.env.PEER_TIMEOUT_MS || 75000))
-    });
+    const peerRegion = REGION === "bogota" ? "cali" : "bogota";
+    let remoteData = { sourceRegion: peerRegion, posts: [] };
+    let partial = false;
 
-    if (!response.ok) {
-      const responseText = await response.text();
-      throw new Error("El nodo compañero respondió HTTP " + response.status + ": " + responseText.slice(0, 150));
-    }
+    // Si el nodo compañero está caído, no se espera a que expire un timeout largo.
+    if (await isPeerAvailable()) {
+      const requestBody = {
+        requestId: randomUUID(),
+        requesterRegion: REGION
+      };
 
-    const remoteData = await response.json();
-    if (
-      remoteData.requestId !== requestBody.requestId ||
-      typeof remoteData.sourceRegion !== "string" ||
-      !remoteData.sourceRegion ||
-      remoteData.sourceRegion === REGION ||
-      !Array.isArray(remoteData.posts) ||
-      remoteData.posts.some(post => post.sourceRegion !== remoteData.sourceRegion)
-    ) {
-      throw new Error("Respuesta inválida del fragmento remoto");
+      try {
+        const response = await fetch(PEER_URL + "/api/replication/posts/query", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-replication-signature": signReplicationBody(requestBody)
+          },
+          body: JSON.stringify(requestBody),
+          signal: AbortSignal.timeout(Number(process.env.PEER_READ_TIMEOUT_MS || 5000))
+        });
+
+        if (!response.ok) {
+          const responseText = await response.text();
+          throw new Error("El nodo compañero respondió HTTP " + response.status + ": " + responseText.slice(0, 150));
+        }
+
+        const candidate = await response.json();
+        if (
+          candidate.requestId !== requestBody.requestId ||
+          candidate.sourceRegion !== peerRegion ||
+          !Array.isArray(candidate.posts) ||
+          candidate.posts.some(post =>
+            post.sourceRegion !== peerRegion ||
+            !post.postId ||
+            !ObjectId.isValid(String(post.authorId || ""))
+          )
+        ) {
+          throw new Error("Respuesta inválida del fragmento remoto");
+        }
+
+        remoteData = candidate;
+      } catch (error) {
+        partial = true;
+        console.warn("Muro en modo parcial; no se pudo consultar " + peerRegion + ":", error.message);
+      }
+    } else {
+      partial = true;
+      console.warn("Muro en modo parcial; " + peerRegion + " no está disponible.");
     }
 
     const combinedPosts = [...localPosts, ...remoteData.posts]
@@ -2900,6 +2970,8 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
 
     res.json({
       region: REGION,
+      partial,
+      unavailableRegion: partial ? peerRegion : null,
       localRegionCount: localPosts.length,
       remoteRegion: remoteData.sourceRegion,
       remoteRegionCount: remoteData.posts.length,
@@ -2929,8 +3001,8 @@ app.get("/api/posts", authenticateToken, async (req, res) => {
       })
     });
   } catch (error) {
-    console.error("Error consultando muro distribuido:", error.message);
-    res.status(503).json({ error: "No se pudo consultar el muro completo de ambas regiones" });
+    console.error("Error consultando muro local:", error.message);
+    res.status(503).json({ error: "No se pudo consultar el muro disponible en esta región" });
   }
 });
 
