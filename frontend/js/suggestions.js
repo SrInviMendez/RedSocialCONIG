@@ -27,8 +27,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       await ConigAPI.request(`/api/follows/${encodeURIComponent(user.userId)}`, {
         method: user.isFollowing ? "DELETE" : "POST"
       });
-      user.isFollowing = !user.isFollowing;
-      updateFollowButton(user, button);
+      user.isFollowing = true;
+      const column = button.closest(".col-12");
+      if (column) column.remove();
     } catch (error) {
       alert(error.message);
     } finally {

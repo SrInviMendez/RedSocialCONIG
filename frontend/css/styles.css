@@ -313,3 +313,76 @@ body {
     padding-right: 8px;
   }
 }
+
+
+/* Identidad de la cuenta activa en Inicio. */
+.home-account-panel {
+  border-top: 1px solid #edf0f5;
+  padding-top: 18px;
+}
+.home-account-avatar {
+  display: block;
+  width: 88px;
+  height: 88px;
+  margin-left: auto;
+  margin-right: auto;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #e9edf7;
+}
+.home-account-avatar-placeholder {
+  display: grid;
+  place-items: center;
+  color: #52627e;
+  font-size: 28px;
+  font-weight: 800;
+}
+
+/* Recomendaciones del perfil con tarjetas en cuadrícula. */
+.profile-recommendation-card {
+  border: 0;
+  border-radius: 14px;
+  box-shadow: 0 3px 16px rgba(25, 40, 80, .06);
+}
+.profile-recommendation-card .card-body {
+  min-height: 245px;
+  padding: 14px 10px;
+}
+.profile-recommendation-link {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+.profile-recommendation-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #e9edf7;
+}
+.profile-recommendation-placeholder {
+  color: #52627e;
+  font-size: 22px;
+  font-weight: 800;
+}
+.profile-recommendation-bio {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  min-height: 48px;
+}
+.edit-avatar-preview {
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #e9edf7;
+}
+.conversation-entry.active {
+  background: #eef2ff;
+  color: var(--conig-primary);
+  font-weight: 700;
+}

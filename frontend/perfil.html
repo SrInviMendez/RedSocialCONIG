@@ -47,7 +47,11 @@
           <strong id="followingCount">0</strong> seguidos
         </div>
       </div>
-      <button id="followProfileButton" class="btn btn-outline-primary d-none" type="button">Seguir</button>
+      <div class="d-flex flex-wrap gap-2">
+        <a id="messageProfileButton" class="btn btn-outline-primary d-none" href="#"><i class="bi bi-chat-dots"></i> Mensaje</a>
+        <button id="followProfileButton" class="btn btn-outline-primary d-none" type="button">Seguir</button>
+        <button id="editProfileButton" class="btn btn-outline-secondary d-none" type="button"><i class="bi bi-pencil"></i> Editar perfil</button>
+      </div>
     </div>
   </div>
 
@@ -55,10 +59,13 @@
     <div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
         <h2 class="h5 fw-bold mb-0">Personas que podrías conocer</h2>
-        <button id="recommendationsMore" class="btn btn-sm btn-outline-primary d-none" type="button">Ver más</button>
+        <div class="d-flex flex-wrap gap-2">
+          <button id="recommendationsMore" class="btn btn-sm btn-outline-primary d-none" type="button">Ver más</button>
+          <a id="recommendationsAll" href="sugerencias.html" class="btn btn-sm btn-link d-none">Ver todas las personas</a>
+        </div>
       </div>
       <p class="text-secondary small">Primero aparecen personas relacionadas con tus conexiones y después los demás perfiles de CONIG.</p>
-      <div id="recommendations" class="text-secondary">Cargando recomendaciones...</div>
+      <div id="recommendations" class="row g-3">Cargando recomendaciones...</div>
     </div>
   </div>
 
@@ -66,6 +73,43 @@
     <div class="card-body">
       <h2 class="h5 fw-bold mb-3" id="profilePostsTitle">Mis publicaciones</h2>
       <div id="profilePosts" class="text-secondary">Cargando publicaciones...</div>
+    </div>
+  </div>
+  <div class="modal fade" id="editProfileModal" tabindex="-1" aria-labelledby="editProfileModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content border-0 rounded-4">
+        <form id="editProfileForm">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="editProfileModalLabel">Editar perfil</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-3">
+              <label for="editDisplayName" class="form-label">Nombre visible</label>
+              <input id="editDisplayName" name="displayName" class="form-control" maxlength="40" required>
+              <div class="form-text">Máximo 40 caracteres.</div>
+            </div>
+            <div class="mb-3">
+              <label for="editBio" class="form-label">Descripción</label>
+              <textarea id="editBio" name="bio" class="form-control" rows="3" maxlength="160"></textarea>
+              <div class="form-text">Máximo 160 caracteres.</div>
+            </div>
+            <div class="mb-2">
+              <label for="editAvatar" class="form-label">Fotografía de perfil</label>
+              <input id="editAvatar" name="avatar" type="file" class="form-control" accept="image/jpeg,image/png,image/webp">
+              <div class="form-text">JPEG, PNG o WebP. Máximo 5 MB.</div>
+            </div>
+            <div id="editAvatarPreviewContainer" class="text-center mt-3 d-none">
+              <img id="editAvatarPreview" class="edit-avatar-preview" alt="Vista previa de la nueva fotografía">
+            </div>
+            <p id="editProfileMessage" class="small text-danger mb-0" aria-live="polite"></p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button id="saveProfileButton" type="submit" class="btn btn-primary">Guardar cambios</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 </main>

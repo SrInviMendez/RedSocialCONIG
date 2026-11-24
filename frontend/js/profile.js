@@ -3,14 +3,23 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const recommendations = document.getElementById("recommendations");
   const recommendationsMore = document.getElementById("recommendationsMore");
+  const recommendationsAll = document.getElementById("recommendationsAll");
   const profilePosts = document.getElementById("profilePosts");
   const followProfileButton = document.getElementById("followProfileButton");
+  const messageProfileButton = document.getElementById("messageProfileButton");
+  const editProfileButton = document.getElementById("editProfileButton");
+  const editProfileForm = document.getElementById("editProfileForm");
+  const editProfileMessage = document.getElementById("editProfileMessage");
+  const editAvatarInput = document.getElementById("editAvatar");
+  const editAvatarPreview = document.getElementById("editAvatarPreview");
+  const editAvatarPreviewContainer = document.getElementById("editAvatarPreviewContainer");
+  const editProfileModal = new bootstrap.Modal(document.getElementById("editProfileModal"));
   const params = new URLSearchParams(window.location.search);
   const requestedUserId = params.get("userId");
   let recommendationUsers = [];
-  let showAllRecommendations = false;
+  let showExpandedRecommendations = false;
   let viewedProfile = null;
-  let isOwnProfile = true;
+  let previewUrl = null;
 
   function node(tag, className, text) {
     const item = document.createElement(tag);
@@ -31,16 +40,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  function updateFollowButton(user, button) {
+    button.textContent = user.isFollowing ? "Siguiendo" : "Seguir";
+    button.classList.toggle("btn-primary", !user.isFollowing);
+    button.classList.toggle("btn-outline-secondary", user.isFollowing);
+  }
+
   async function changeFollow(user, button, afterChange) {
     button.disabled = true;
     try {
-      await ConigAPI.request(`/api/follows/${encodeURIComponent(user.userId)}`, {
+      await ConigAPI.request("/api/follows/" + encodeURIComponent(user.userId), {
         method: user.isFollowing ? "DELETE" : "POST"
       });
       user.isFollowing = !user.isFollowing;
-      button.textContent = user.isFollowing ? "Siguiendo" : "Seguir";
-      button.classList.toggle("btn-primary", !user.isFollowing);
-      button.classList.toggle("btn-outline-secondary", user.isFollowing);
+      updateFollowButton(user, button);
       if (afterChange) afterChange(user);
     } catch (error) {
       alert(error.message);
@@ -52,57 +65,61 @@ document.addEventListener("DOMContentLoaded", async () => {
   function renderRecommendations() {
     recommendations.replaceChildren();
     if (!recommendationUsers.length) {
-      recommendations.textContent = "Todavía no hay otros perfiles registrados en CONIG.";
+      recommendations.textContent = "No hay perfiles nuevos para recomendarte por ahora.";
       recommendationsMore.classList.add("d-none");
+      recommendationsAll.classList.add("d-none");
       return;
     }
 
-    const visibleUsers = showAllRecommendations
-      ? recommendationUsers
-      : recommendationUsers.slice(0, 4);
-
+    const visibleUsers = recommendationUsers.slice(0, showExpandedRecommendations ? 8 : 4);
     visibleUsers.forEach(person => {
-      const item = node("div", "recommendation-item d-flex align-items-center gap-3 flex-wrap");
-      const link = node("a", "d-flex align-items-center gap-3 text-decoration-none text-reset flex-grow-1");
-      link.href = `perfil.html?userId=${encodeURIComponent(person.userId)}`;
+      const column = node("div", "col-6 col-lg-3");
+      const card = node("article", "card profile-recommendation-card h-100");
+      const body = node("div", "card-body d-flex flex-column align-items-center text-center");
+      const link = node("a", "profile-recommendation-link text-decoration-none text-reset");
+      link.href = "perfil.html?userId=" + encodeURIComponent(person.userId);
 
       if (person.avatarUrl) {
-        const avatar = node("img", "recommendation-avatar");
+        const avatar = node("img", "profile-recommendation-avatar");
         avatar.src = person.avatarUrl;
-        avatar.alt = `Foto de ${person.username}`;
+        avatar.alt = "Foto de " + person.username;
         avatar.loading = "lazy";
         link.append(avatar);
       } else {
-        link.append(node("span", "recommendation-avatar recommendation-avatar-placeholder",
+        link.append(node("span", "profile-recommendation-avatar profile-recommendation-placeholder",
           (person.username || "U").charAt(0).toUpperCase()));
       }
 
-      const identity = node("span", "d-flex flex-column");
-      identity.append(node("strong", "", person.displayName || person.username));
-      identity.append(node("small", "text-secondary", `@${person.username}`));
-      const detail = person.commonConnectionsCount > 0
-        ? `${person.commonConnectionsCount} conexiones en común`
+      link.append(node("strong", "d-block mt-2", person.displayName || person.username));
+      link.append(node("small", "text-secondary d-block", "@" + person.username));
+      body.append(link);
+      const description = person.commonConnectionsCount > 0
+        ? person.commonConnectionsCount + " conexiones en común"
         : (person.bio || "Perfil de la comunidad CONIG");
-      identity.append(node("small", "text-secondary", detail));
-      link.append(identity);
+      body.append(node("p", "profile-recommendation-bio text-secondary small mt-2 mb-3", description));
 
-      const button = node("button", `btn btn-sm ${person.isFollowing ? "btn-outline-secondary" : "btn-primary"}`,
-        person.isFollowing ? "Siguiendo" : "Seguir");
+      const button = node("button", "btn btn-sm btn-primary mt-auto", "Seguir");
       button.type = "button";
-      button.addEventListener("click", () => changeFollow(person, button));
-      item.append(link, button);
-      recommendations.append(item);
+      button.addEventListener("click", () => changeFollow(person, button, () => {
+        recommendationUsers = recommendationUsers.filter(item => item.userId !== person.userId);
+        renderRecommendations();
+      }));
+      body.append(button);
+      card.append(body);
+      column.append(card);
+      recommendations.append(column);
     });
 
     recommendationsMore.classList.toggle("d-none", recommendationUsers.length <= 4);
-    recommendationsMore.textContent = showAllRecommendations ? "Ver menos" : "Ver más";
+    recommendationsMore.textContent = showExpandedRecommendations ? "Ver menos" : "Ver más";
+    recommendationsAll.classList.toggle("d-none", recommendationUsers.length <= 4);
   }
 
   async function loadProfilePosts(profileId) {
     profilePosts.textContent = "Cargando publicaciones...";
     profilePosts.replaceChildren();
     try {
-      const result = await ConigAPI.request(`/api/users/${encodeURIComponent(profileId)}/posts`);
+      const result = await ConigAPI.request("/api/users/" + encodeURIComponent(profileId) + "/posts");
       if (!result.posts || !result.posts.length) {
         profilePosts.textContent = "Esta persona todavía no ha publicado nada.";
         return;
@@ -121,7 +138,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const footer = node("div", "d-flex justify-content-between align-items-center mt-3");
         footer.append(
           node("small", "text-secondary", new Date(post.createdAt).toLocaleString("es-CO")),
-          node("small", "text-secondary", `${Number(post.likeCount) || 0} Me gusta`)
+          node("small", "text-secondary", (Number(post.likeCount) || 0) + " Me gusta")
         );
         card.append(footer);
         profilePosts.append(card);
@@ -131,32 +148,102 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  function showAvatarPreview(file) {
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+    }
+    if (!file) {
+      editAvatarPreview.removeAttribute("src");
+      editAvatarPreviewContainer.classList.add("d-none");
+      return;
+    }
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    if (!allowed.includes(file.type) || file.size > 5 * 1024 * 1024) {
+      alert("Selecciona una imagen JPEG, PNG o WebP de máximo 5 MB.");
+      editAvatarInput.value = "";
+      editAvatarPreview.removeAttribute("src");
+      editAvatarPreviewContainer.classList.add("d-none");
+      return;
+    }
+    previewUrl = URL.createObjectURL(file);
+    editAvatarPreview.src = previewUrl;
+    editAvatarPreviewContainer.classList.remove("d-none");
+  }
+
+  editAvatarInput.addEventListener("change", () => showAvatarPreview(editAvatarInput.files[0]));
+
+  editProfileButton.addEventListener("click", () => {
+    editProfileForm.elements.displayName.value = viewedProfile.displayName || "";
+    editProfileForm.elements.bio.value = viewedProfile.bio || "";
+    editAvatarInput.value = "";
+    editProfileMessage.textContent = "";
+    showAvatarPreview(null);
+    editProfileModal.show();
+  });
+
+  editProfileForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    const saveButton = document.getElementById("saveProfileButton");
+    const file = editAvatarInput.files[0];
+    if (file && file.size > 5 * 1024 * 1024) {
+      editProfileMessage.textContent = "La fotografía no puede superar los 5 MB.";
+      return;
+    }
+
+    saveButton.disabled = true;
+    editProfileMessage.classList.remove("text-danger");
+    editProfileMessage.classList.add("text-secondary");
+    editProfileMessage.textContent = "Guardando cambios...";
+    try {
+      const formData = new FormData(editProfileForm);
+      const result = await ConigAPI.request("/api/me", {
+        method: "PATCH",
+        data: formData,
+        timeoutMs: 120000
+      });
+      viewedProfile = { ...viewedProfile, ...result.user };
+      document.getElementById("profileName").textContent = viewedProfile.displayName || viewedProfile.username;
+      document.getElementById("profileBio").textContent = viewedProfile.bio || "Sin biografía";
+      const avatar = document.getElementById("profileAvatar");
+      const placeholder = document.getElementById("avatarPlaceholder");
+      setAvatar(avatar, placeholder, viewedProfile.avatarUrl, "Fotografía de " + viewedProfile.username);
+      editProfileModal.hide();
+    } catch (error) {
+      editProfileMessage.classList.remove("text-secondary");
+      editProfileMessage.classList.add("text-danger");
+      editProfileMessage.textContent = error.message;
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
+
   try {
     const currentUser = await ConigAPI.request("/api/me");
-    isOwnProfile = !requestedUserId || requestedUserId === currentUser.id;
+    const isOwnProfile = !requestedUserId || requestedUserId === currentUser.id;
     viewedProfile = isOwnProfile
       ? currentUser
-      : await ConigAPI.request(`/api/users/${encodeURIComponent(requestedUserId)}`);
+      : await ConigAPI.request("/api/users/" + encodeURIComponent(requestedUserId));
 
     const profileId = viewedProfile.id || viewedProfile.userId;
     document.getElementById("profilePageTitle").textContent = isOwnProfile ? "Mi perfil" : "Perfil de usuario";
     document.getElementById("profileName").textContent = viewedProfile.displayName || viewedProfile.username;
-    document.getElementById("profileUsername").textContent = `@${viewedProfile.username}`;
+    document.getElementById("profileUsername").textContent = "@" + viewedProfile.username;
     document.getElementById("profileBio").textContent = viewedProfile.bio || "Sin biografía";
     document.getElementById("profilePostsTitle").textContent = isOwnProfile
       ? "Mis publicaciones"
-      : `Publicaciones de @${viewedProfile.username}`;
+      : "Publicaciones de @" + viewedProfile.username;
 
     const avatar = document.getElementById("profileAvatar");
     const placeholder = document.getElementById("avatarPlaceholder");
-    setAvatar(avatar, placeholder, viewedProfile.avatarUrl, `Fotografía de ${viewedProfile.username}`);
+    setAvatar(avatar, placeholder, viewedProfile.avatarUrl, "Fotografía de " + viewedProfile.username);
 
     if (isOwnProfile) {
+      editProfileButton.classList.remove("d-none");
       const follows = await ConigAPI.request("/api/follows");
       document.getElementById("followersCount").textContent = follows.followersCount;
       document.getElementById("followingCount").textContent = follows.followingCount;
       document.getElementById("recommendationsCard").classList.remove("d-none");
-
       const suggested = await ConigAPI.request("/api/recommendations");
       recommendationUsers = suggested.recommendations || [];
       renderRecommendations();
@@ -165,14 +252,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("followingCount").textContent = viewedProfile.followingCount || 0;
       document.getElementById("recommendationsCard").classList.add("d-none");
 
+      messageProfileButton.href = "mensajes.html?userId=" + encodeURIComponent(profileId);
+      messageProfileButton.classList.remove("d-none");
+
       const profileFollow = {
         userId: profileId,
         isFollowing: Boolean(viewedProfile.isFollowing)
       };
       followProfileButton.classList.remove("d-none");
-      followProfileButton.textContent = profileFollow.isFollowing ? "Siguiendo" : "Seguir";
-      followProfileButton.classList.toggle("btn-primary", !profileFollow.isFollowing);
-      followProfileButton.classList.toggle("btn-outline-secondary", profileFollow.isFollowing);
+      updateFollowButton(profileFollow, followProfileButton);
       followProfileButton.addEventListener("click", () => changeFollow(
         profileFollow,
         followProfileButton,
@@ -185,7 +273,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
 
     recommendationsMore.addEventListener("click", () => {
-      showAllRecommendations = !showAllRecommendations;
+      showExpandedRecommendations = !showExpandedRecommendations;
       renderRecommendations();
     });
 

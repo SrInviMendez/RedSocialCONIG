@@ -100,7 +100,7 @@ async function uploadProfileAvatar(file, userId) {
       {
         folder: "red-social/avatars",
         public_id: String(userId),
-        overwrite: false,
+        overwrite: true,
         resource_type: "image",
         format: "webp"
       },
@@ -692,107 +692,114 @@ app.post("/api/replication/users/query", async (req, res) => {
   }
 });
 
-// Recibir un usuario replicado desde otra región
+// Recibir registros y actualizaciones de perfil desde la otra región.
 app.post("/api/replication/users", async (req, res) => {
   const body = req.body;
-
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return res.status(400).json({ error: "Mensaje inválido" });
   }
 
   const signature = req.get("x-replication-signature") || "";
-
   if (!/^[a-f0-9]{64}$/i.test(signature)) {
     return res.status(401).json({ error: "Firma inválida" });
   }
 
   const receivedSignature = Buffer.from(signature, "hex");
-  const expectedSignature = Buffer.from(
-    signReplicationBody(body),
-    "hex"
-  );
-
+  const expectedSignature = Buffer.from(signReplicationBody(body), "hex");
   if (
     receivedSignature.length !== expectedSignature.length ||
     !timingSafeEqual(receivedSignature, expectedSignature)
   ) {
-    return res.status(401).json({
-      error: "No se pudo validar el origen del evento"
-    });
+    return res.status(401).json({ error: "No se pudo validar el origen del evento" });
   }
 
   const { eventId, type, sourceRegion, payload } = body;
+  const isRegistration = type === "USER_REGISTERED";
+  const isProfileUpdate = type === "USER_PROFILE_UPDATED";
+  const validAvatarUrl = value => value === null || value === undefined ||
+    (typeof value === "string" && value.startsWith("https://res.cloudinary.com/"));
 
   if (
-    !eventId ||
-    type !== "USER_REGISTERED" ||
-    !sourceRegion ||
-    sourceRegion === REGION ||
-    !payload ||
-    !ObjectId.isValid(payload.userId) ||
-    !payload.username ||
-    !payload.email ||
-    !payload.passwordHash ||
-    payload.homeRegion !== sourceRegion ||
+    !eventId || (!isRegistration && !isProfileUpdate) ||
+    !sourceRegion || sourceRegion === REGION || !payload ||
+    !ObjectId.isValid(payload.userId) || payload.homeRegion !== sourceRegion ||
+    (isRegistration && (!payload.username || !payload.email || !payload.passwordHash)) ||
+    (isProfileUpdate && (
+      (payload.displayName !== null && typeof payload.displayName !== "string") ||
+      typeof payload.bio !== "string" ||
+      !payload.updatedAt ||
+      (payload.displayName && payload.displayName.length > 40) ||
+      payload.bio.length > 160 ||
+      !validAvatarUrl(payload.avatarUrl) ||
+      (payload.avatarPublicId !== null && payload.avatarPublicId !== undefined &&
+        typeof payload.avatarPublicId !== "string")
+    )) ||
     (payload.displayName != null &&
-      (typeof payload.displayName !== "string" ||
-       payload.displayName.length > 40)) ||
+      (typeof payload.displayName !== "string" || payload.displayName.length > 40)) ||
     (payload.bio !== undefined &&
-      (typeof payload.bio !== "string" ||
-       payload.bio.length > 160)) ||
-    (payload.avatarUrl !== undefined &&
-      (typeof payload.avatarUrl !== "string" ||
-       !payload.avatarUrl.startsWith("https://res.cloudinary.com/"))) ||
-    (payload.avatarPublicId !== undefined &&
+      (typeof payload.bio !== "string" || payload.bio.length > 160)) ||
+    !validAvatarUrl(payload.avatarUrl) ||
+    (payload.avatarPublicId !== undefined && payload.avatarPublicId !== null &&
       typeof payload.avatarPublicId !== "string")
   ) {
-    return res.status(400).json({
-      error: "Datos del evento incompletos o inválidos"
-    });
+    return res.status(400).json({ error: "Datos del evento incompletos o inválidos" });
   }
 
   const session = client.startSession();
   let duplicate = false;
-
   try {
-    const createdAt = payload.createdAt
-      ? new Date(payload.createdAt)
-      : new Date();
-
-    if (Number.isNaN(createdAt.getTime())) {
-      return res.status(400).json({
-        error: "Fecha de creación inválida"
-      });
+    const createdAt = payload.createdAt ? new Date(payload.createdAt) : new Date();
+    const updatedAt = isProfileUpdate ? new Date(payload.updatedAt) : null;
+    if (Number.isNaN(createdAt.getTime()) ||
+        (isProfileUpdate && Number.isNaN(updatedAt.getTime()))) {
+      return res.status(400).json({ error: "Fecha del evento inválida" });
     }
 
     await session.withTransaction(async () => {
-      const processed = await db.collection("processed_events").findOne(
-        { eventId },
-        { session }
-      );
-
+      const processed = await db.collection("processed_events").findOne({ eventId }, { session });
       if (processed) {
         duplicate = true;
         return;
       }
 
-      await db.collection("users").updateOne(
-        { _id: new ObjectId(payload.userId) },
-        {
-          $setOnInsert: {
-            username: payload.username,
-            email: payload.email,
-            passwordHash: payload.passwordHash,
-            homeRegion: payload.homeRegion,
-            displayName: payload.displayName || null,
-            bio: payload.bio || "",
-            avatarUrl: payload.avatarUrl || null,
-            avatarPublicId: payload.avatarPublicId || null,
-            createdAt
-          }
-        },
-        { upsert: true, session }
-      );
+      if (isRegistration) {
+        await db.collection("users").updateOne(
+          { _id: new ObjectId(payload.userId) },
+          {
+            $setOnInsert: {
+              username: payload.username,
+              email: payload.email,
+              passwordHash: payload.passwordHash,
+              homeRegion: payload.homeRegion,
+              displayName: payload.displayName || null,
+              bio: payload.bio || "",
+              avatarUrl: payload.avatarUrl || null,
+              avatarPublicId: payload.avatarPublicId || null,
+              createdAt
+            }
+          },
+          { upsert: true, session }
+        );
+      } else {
+        const updated = await db.collection("users").updateOne(
+          { _id: new ObjectId(payload.userId), homeRegion: sourceRegion },
+          {
+            $set: {
+              displayName: payload.displayName || null,
+              bio: payload.bio || "",
+              avatarUrl: payload.avatarUrl || null,
+              avatarPublicId: payload.avatarPublicId || null,
+              profileUpdatedAt: updatedAt
+            }
+          },
+          { session }
+        );
+        if (!updated.matchedCount) {
+          const error = new Error("El usuario todavía no está replicado en este nodo");
+          error.statusCode = 503;
+          throw error;
+        }
+      }
 
       await db.collection("processed_events").insertOne({
         eventId,
@@ -802,22 +809,17 @@ app.post("/api/replication/users", async (req, res) => {
     });
 
     res.json({
-      message: duplicate
-        ? "Evento ya procesado"
-        : "Usuario replicado correctamente",
+      message: duplicate ? "Evento de usuario ya procesado" :
+        (isRegistration ? "Usuario replicado correctamente" : "Perfil actualizado en el nodo compañero"),
       duplicate
     });
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(409).json({
-        error: "Conflicto: el usuario o correo ya existe en esta región"
-      });
+      return res.status(409).json({ error: "Conflicto con el usuario o correo replicado" });
     }
-
-    console.error("Error recibiendo replicación:", error.message);
-
-    res.status(500).json({
-      error: "No se pudo procesar el evento"
+    console.error("Error recibiendo evento de usuario:", error.message);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode === 503 ? error.message : "No se pudo procesar el evento de usuario"
     });
   } finally {
     await session.endSession();
@@ -1802,6 +1804,97 @@ app.get("/api/me", authenticateToken, async (req, res) => {
 
 
 
+// Actualizar únicamente el nombre visible, la biografía y la fotografía del perfil propio.
+app.patch("/api/me", authenticateToken, receiveAvatarFile, async (req, res) => {
+  if (!ObjectId.isValid(req.auth.sub)) {
+    return res.status(401).json({ error: "Identificador de usuario inválido" });
+  }
+
+  const userId = new ObjectId(req.auth.sub);
+  const session = client.startSession();
+  let uploadedAvatar = null;
+
+  try {
+    const currentUser = await db.collection("users").findOne({ _id: userId });
+    if (!currentUser) {
+      return res.status(404).json({ error: "No se encontró el perfil del usuario" });
+    }
+
+    const displayNameInput = req.body?.displayName;
+    const bioInput = req.body?.bio;
+
+    if (typeof displayNameInput !== "string" || typeof bioInput !== "string") {
+      return res.status(400).json({ error: "Debes proporcionar el nombre visible y la biografía" });
+    }
+
+    const displayName = displayNameInput.trim();
+    const bio = bioInput.trim();
+
+    if (displayName.length > 40) {
+      return res.status(400).json({ error: "El nombre visible no puede superar 40 caracteres" });
+    }
+    if (bio.length > 160) {
+      return res.status(400).json({ error: "La biografía no puede superar 160 caracteres" });
+    }
+
+    if (req.file) {
+      uploadedAvatar = await uploadProfileAvatar(req.file, userId);
+    }
+
+    const avatarUrl = uploadedAvatar?.avatarUrl || currentUser.avatarUrl || null;
+    const avatarPublicId = uploadedAvatar?.avatarPublicId || currentUser.avatarPublicId || null;
+    const updatedAt = new Date();
+    const profileData = {
+      displayName: displayName || null,
+      bio,
+      avatarUrl,
+      avatarPublicId
+    };
+
+    await session.withTransaction(async () => {
+      const result = await db.collection("users").updateOne(
+        { _id: userId },
+        { $set: { ...profileData, profileUpdatedAt: updatedAt } },
+        { session }
+      );
+
+      if (!result.matchedCount) {
+        throw new Error("El perfil dejó de estar disponible durante la actualización");
+      }
+
+      await db.collection("outbox").insertOne({
+        eventId: randomUUID(),
+        type: "USER_PROFILE_UPDATED",
+        sourceRegion: REGION,
+        createdAt: updatedAt,
+        payload: {
+          userId: userId.toString(),
+          homeRegion: currentUser.homeRegion,
+          ...profileData,
+          updatedAt
+        }
+      }, { session });
+    });
+
+    res.json({
+      message: "Perfil actualizado correctamente",
+      user: {
+        id: userId.toString(),
+        username: currentUser.username,
+        displayName: profileData.displayName,
+        bio: profileData.bio,
+        avatarUrl: profileData.avatarUrl,
+        homeRegion: currentUser.homeRegion
+      }
+    });
+  } catch (error) {
+    console.error("Error actualizando perfil:", error.message);
+    res.status(500).json({ error: "No se pudo actualizar el perfil" });
+  } finally {
+    await session.endSession();
+  }
+});
+
 // Seguir a otro usuario
 app.post("/api/follows/:userId", authenticateToken, async (req, res) => {
   if (
@@ -2051,7 +2144,7 @@ async function requestPeerPublicUsers(options = {}) {
 
 // Construir el directorio uniendo los perfiles de ambos nodos y priorizando amigos de amigos.
 async function buildUserDirectory(currentUserId) {
-  const [localUsers, followingRows] = await Promise.all([
+  const [localUsers, followingRows, followerRows] = await Promise.all([
     db.collection("users").find({}, {
       projection: {
         username: 1,
@@ -2065,6 +2158,10 @@ async function buildUserDirectory(currentUserId) {
     db.collection("follows").find(
       { followerId: currentUserId },
       { projection: { followedId: 1 } }
+    ).toArray(),
+    db.collection("follows").find(
+      { followedId: currentUserId },
+      { projection: { followerId: 1 } }
     ).toArray()
   ]);
 
@@ -2096,6 +2193,7 @@ async function buildUserDirectory(currentUserId) {
 
   const followedIds = followingRows.map(item => item.followedId);
   const followingSet = new Set(followedIds.map(id => id.toString()));
+  const followedBySet = new Set(followerRows.map(item => item.followerId.toString()));
   const commonCounts = new Map();
 
   if (followedIds.length) {
@@ -2120,7 +2218,8 @@ async function buildUserDirectory(currentUserId) {
   }
 
   const users = [...usersById.values()]
-    .filter(user => user.userId !== currentUserId.toString())
+    .filter(user => user.userId !== currentUserId.toString() &&
+      !followingSet.has(user.userId) && !followedBySet.has(user.userId))
     .map(user => ({
       ...user,
       isFollowing: followingSet.has(user.userId),
@@ -3013,6 +3112,7 @@ async function dispatchPendingAuditEvents() {
       type: {
         $in: [
           "USER_REGISTERED",
+          "USER_PROFILE_UPDATED",
           "FOLLOW_CREATED",
           "FOLLOW_DELETED",
           "MESSAGE_SENT",
@@ -3039,6 +3139,12 @@ async function dispatchPendingAuditEvents() {
         payload = {
           userId: original.userId ? String(original.userId) : null,
           username: original.username || null
+        };
+      }
+
+      if (event.type === "USER_PROFILE_UPDATED") {
+        payload = {
+          userId: original.userId ? String(original.userId) : null
         };
       }
 
@@ -3165,6 +3271,7 @@ async function replicatePendingEvents() {
       type: {
         $in: [
           "USER_REGISTERED",
+          "USER_PROFILE_UPDATED",
           "FOLLOW_CREATED",
           "FOLLOW_DELETED",
           "LIKE_CREATED",
@@ -3180,6 +3287,12 @@ async function replicatePendingEvents() {
         {
           type: "USER_REGISTERED",
           "payload.passwordHash": { $type: "string" }
+        },
+        {
+          type: "USER_PROFILE_UPDATED",
+          "payload.userId": { $type: "string" },
+          "payload.homeRegion": { $type: "string" },
+          "payload.updatedAt": { $exists: true }
         },
         {
           type: { $in: ["FOLLOW_CREATED", "FOLLOW_DELETED"] },
@@ -3216,7 +3329,7 @@ async function replicatePendingEvents() {
 
       try {
         const response = await fetch(
-          `${PEER_URL}/api/replication/${event.type === "USER_REGISTERED" ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : "messages"}`,
+          `${PEER_URL}/api/replication/${["USER_REGISTERED", "USER_PROFILE_UPDATED"].includes(event.type) ? "users" : ["FOLLOW_CREATED", "FOLLOW_DELETED"].includes(event.type) ? "follows" : ["LIKE_CREATED", "LIKE_DELETED"].includes(event.type) ? "likes" : "messages"}`,
           {
             method: "POST",
             headers: {

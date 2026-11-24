@@ -134,7 +134,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         const button = element("button", `btn btn-sm ${user.isFollowing ? "btn-outline-secondary" : "btn-primary"}`,
           user.isFollowing ? "Siguiendo" : "Seguir");
         button.type = "button";
-        button.addEventListener("click", () => toggleFollow(user, button));
+        button.addEventListener("click", () => toggleFollow(user, button, () => row.remove()));
 
         row.append(link, button);
         directoryPreview.append(row);
@@ -256,6 +256,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const user = await ConigAPI.request("/api/me");
     document.getElementById("welcomeName").textContent = user.displayName || user.username;
+
+    const homeProfileName = document.getElementById("homeProfileName");
+    const homeProfileUsername = document.getElementById("homeProfileUsername");
+    const homeProfileAvatar = document.getElementById("homeProfileAvatar");
+    const homeProfilePlaceholder = document.getElementById("homeProfilePlaceholder");
+    homeProfileName.textContent = user.displayName || user.username;
+    homeProfileUsername.textContent = "@" + user.username;
+    if (user.avatarUrl) {
+      homeProfileAvatar.src = user.avatarUrl;
+      homeProfileAvatar.alt = "Fotografía de perfil de " + user.username;
+      homeProfileAvatar.classList.remove("d-none");
+      homeProfilePlaceholder.classList.add("d-none");
+    } else {
+      homeProfilePlaceholder.textContent = (user.username || "C").charAt(0).toUpperCase();
+    }
   } catch {
     sessionStorage.clear();
     window.location.href = "login.html";
