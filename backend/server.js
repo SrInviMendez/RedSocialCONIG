@@ -3638,6 +3638,58 @@ app.patch("/api/messages/:messageId/read", authenticateToken, async (req, res) =
 // Este proceso es independiente de la replicación entre regiones.
 let auditRunning = false;
 let atlasClient = null;
+let atlasConnectPromise = null;
+
+async function getAuditEventsCollection() {
+  if (!process.env.ATLAS_URI) {
+    const error = new Error("La auditoría de MongoDB Atlas no está configurada (ATLAS_URI)");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (!atlasClient) {
+    if (!atlasConnectPromise) {
+      atlasConnectPromise = (async () => {
+        const candidate = new MongoClient(process.env.ATLAS_URI, {
+          serverSelectionTimeoutMS: 5000
+        });
+
+        try {
+          await candidate.connect();
+          atlasClient = candidate;
+          console.log("Conexión de auditoría con MongoDB Atlas establecida");
+        } catch (error) {
+          await candidate.close().catch(() => {});
+          throw error;
+        }
+      })().finally(() => {
+        atlasConnectPromise = null;
+      });
+    }
+
+    await atlasConnectPromise;
+  }
+
+  return atlasClient
+    .db("red_social_triggers")
+    .collection("trigger_events");
+}
+
+const ADMIN_TRIGGER_DEFINITIONS = [
+  { type: "USER_REGISTERED", label: "Registro de usuario", description: "Registra la creación de una cuenta nueva." },
+  { type: "USER_PROFILE_UPDATED", label: "Actualización de perfil", description: "Registra cambios en el perfil y la fotografía de una cuenta." },
+  { type: "FOLLOW_CREATED", label: "Nuevo seguimiento", description: "Registra cuando una cuenta comienza a seguir a otra." },
+  { type: "FOLLOW_DELETED", label: "Seguimiento eliminado", description: "Registra cuando se deja de seguir a una cuenta." },
+  { type: "POST_DELETED", label: "Publicación eliminada", description: "Registra la eliminación de una publicación propia." },
+  { type: "LIKE_CREATED", label: "Me gusta agregado", description: "Registra un nuevo me gusta en una publicación." },
+  { type: "LIKE_DELETED", label: "Me gusta retirado", description: "Registra cuando se retira un me gusta." },
+  { type: "CONVERSATION_ACCEPTED", label: "Conversación aceptada", description: "Registra la aceptación de una solicitud de conversación." },
+  { type: "CONVERSATION_CLEARED", label: "Conversación limpiada", description: "Registra cuando una persona oculta una conversación de su historial." },
+  { type: "MESSAGE_SENT", label: "Mensaje enviado", description: "Registra el envío de un mensaje privado." },
+  { type: "MESSAGE_DELIVERED", label: "Mensaje entregado", description: "Registra la entrega de un mensaje a su destinatario." },
+  { type: "MESSAGE_READ", label: "Mensaje leído", description: "Registra cuándo el destinatario lee un mensaje." },
+  { type: "ADMIN_ROLE_UPDATED", label: "Permisos administrativos", description: "Registra la concesión o retirada de permisos administrativos." }
+];
 
 async function dispatchPendingAuditEvents() {
   if (!db || auditRunning || !process.env.ATLAS_URI) return;
@@ -3645,24 +3697,7 @@ async function dispatchPendingAuditEvents() {
   auditRunning = true;
 
   try {
-    if (!atlasClient) {
-      const candidate = new MongoClient(process.env.ATLAS_URI, {
-        serverSelectionTimeoutMS: 5000
-      });
-
-      try {
-        await candidate.connect();
-        atlasClient = candidate;
-        console.log("Conexión de auditoría con MongoDB Atlas establecida");
-      } catch (error) {
-        await candidate.close().catch(() => {});
-        throw error;
-      }
-    }
-
-    const atlasEvents = atlasClient
-      .db("red_social_triggers")
-      .collection("trigger_events");
+    const atlasEvents = await getAuditEventsCollection();
 
     const pendingEvents = await db.collection("outbox").find({
       type: {
@@ -3673,7 +3708,13 @@ async function dispatchPendingAuditEvents() {
           "FOLLOW_DELETED",
           "MESSAGE_SENT",
           "MESSAGE_DELIVERED",
-          "MESSAGE_READ"
+          "MESSAGE_READ",
+          "POST_DELETED",
+          "LIKE_CREATED",
+          "LIKE_DELETED",
+          "CONVERSATION_ACCEPTED",
+          "CONVERSATION_CLEARED",
+          "ADMIN_ROLE_UPDATED"
         ]
       },
       auditDeliveredAt: { $exists: false },
@@ -3736,6 +3777,42 @@ async function dispatchPendingAuditEvents() {
           recipientId: original.recipientId
             ? String(original.recipientId)
             : null
+        };
+      }
+
+      if (event.type === "POST_DELETED") {
+        payload = {
+          postId: original.postId || null,
+          authorId: original.authorId ? String(original.authorId) : null
+        };
+      }
+
+      if (event.type === "LIKE_CREATED" || event.type === "LIKE_DELETED") {
+        payload = {
+          postId: original.postId || null,
+          userId: original.userId ? String(original.userId) : null
+        };
+      }
+
+      if (event.type === "CONVERSATION_ACCEPTED") {
+        payload = {
+          conversationId: original.conversationId ? String(original.conversationId) : null,
+          acceptedBy: original.acceptedBy ? String(original.acceptedBy) : null
+        };
+      }
+
+      if (event.type === "CONVERSATION_CLEARED") {
+        payload = {
+          conversationId: original.conversationId ? String(original.conversationId) : null,
+          userId: original.userId ? String(original.userId) : null
+        };
+      }
+
+      if (event.type === "ADMIN_ROLE_UPDATED") {
+        payload = {
+          userId: original.userId ? String(original.userId) : null,
+          role: original.role || null,
+          updatedBy: original.updatedBy ? String(original.updatedBy) : null
         };
       }
 
@@ -4172,6 +4249,95 @@ app.get("/api/admin/overview", authenticateToken, requireAdmin, async (req, res)
   }
 });
 
+app.get("/api/admin/triggers", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const events = await getAuditEventsCollection();
+    const grouped = await events.aggregate([
+      { $sort: { occurredAt: -1 } },
+      {
+        $group: {
+          _id: "$type",
+          count: { $sum: 1 },
+          lastExecutedAt: { $first: "$occurredAt" },
+          lastRegion: { $first: "$sourceRegion" }
+        }
+      }
+    ]).toArray();
+
+    const summary = new Map(grouped.map(item => [item._id, item]));
+    const triggers = ADMIN_TRIGGER_DEFINITIONS.map(definition => {
+      const item = summary.get(definition.type);
+      return {
+        ...definition,
+        count: item?.count || 0,
+        lastExecutedAt: item?.lastExecutedAt || null,
+        lastRegion: item?.lastRegion || null
+      };
+    });
+
+    res.json({
+      totalExecutions: grouped.reduce((total, item) => total + item.count, 0),
+      triggerTypes: triggers.length,
+      triggers
+    });
+  } catch (error) {
+    console.error("Error consultando triggers administrativos:", error.message);
+    res.status(error.statusCode || 503).json({ error: "No se pudieron consultar los triggers y su auditoría" });
+  }
+});
+
+app.get("/api/admin/audit", authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const type = String(req.query.type || "").trim();
+    const region = String(req.query.region || "").trim().toLowerCase();
+    const from = String(req.query.from || "").trim();
+    const to = String(req.query.to || "").trim();
+    const limit = Math.min(200, Math.max(1, Number.parseInt(req.query.limit, 10) || 100));
+
+    if (type && !ADMIN_TRIGGER_DEFINITIONS.some(item => item.type === type)) {
+      return res.status(400).json({ error: "Tipo de evento no válido" });
+    }
+    if (region && !["bogota", "cali"].includes(region)) {
+      return res.status(400).json({ error: "Región no válida" });
+    }
+    if ((from && !/^\d{4}-\d{2}-\d{2}$/.test(from)) || (to && !/^\d{4}-\d{2}-\d{2}$/.test(to))) {
+      return res.status(400).json({ error: "Las fechas deben tener el formato AAAA-MM-DD" });
+    }
+
+    const filter = {};
+    if (type) filter.type = type;
+    if (region) filter.sourceRegion = region;
+    if (from || to) {
+      filter.occurredAt = {};
+      if (from) filter.occurredAt.$gte = new Date(from + "T00:00:00.000Z");
+      if (to) filter.occurredAt.$lte = new Date(to + "T23:59:59.999Z");
+      if (from && to && filter.occurredAt.$gte > filter.occurredAt.$lte) {
+        return res.status(400).json({ error: "El rango de fechas no es válido" });
+      }
+    }
+
+    const events = await getAuditEventsCollection();
+    const [total, records] = await Promise.all([
+      events.countDocuments(filter),
+      events.find(filter, {
+        projection: { _id: 0, eventId: 1, type: 1, sourceRegion: 1, occurredAt: 1, payload: 1 }
+      }).sort({ occurredAt: -1 }).limit(limit).toArray()
+    ]);
+
+    res.json({
+      total,
+      limit,
+      events: records.map(event => ({
+        ...event,
+        label: ADMIN_TRIGGER_DEFINITIONS.find(item => item.type === event.type)?.label || event.type
+      }))
+    });
+  } catch (error) {
+    console.error("Error consultando auditoría administrativa:", error.message);
+    res.status(error.statusCode || 503).json({ error: "No se pudo consultar el historial de auditoría" });
+  }
+});
+
 app.get("/api/admin/users", authenticateToken, requireAdmin, async (req, res) => {
   try {
     const search = String(req.query.search || "").trim().toLowerCase();
@@ -4270,7 +4436,12 @@ app.patch("/api/admin/users/:userId/role", authenticateToken, requireAdmin, asyn
         type: "ADMIN_ROLE_UPDATED",
         sourceRegion: REGION,
         createdAt: updatedAt,
-        payload: { userId: targetId.toString(), role, updatedAt }
+        payload: {
+          userId: targetId.toString(),
+          role,
+          updatedAt,
+          updatedBy: req.adminUserId.toString()
+        }
       }, { session });
     });
 

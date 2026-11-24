@@ -145,7 +145,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   async function refreshAll() {
     message.textContent = "Actualizando el panel...";
     try {
-      await Promise.all([loadOverview(), loadUsers()]);
+      if (activeAdminTab === "overview") {
+        await loadOverview();
+      } else if (activeAdminTab === "users") {
+        await loadUsers();
+      } else if (activeAdminTab === "triggers") {
+        await loadTriggers();
+      } else if (activeAdminTab === "audit") {
+        await loadTriggers();
+        await loadAudit();
+      }
       message.textContent = "Panel actualizado correctamente.";
     } catch (error) {
       message.textContent = error.message;
@@ -162,6 +171,146 @@ document.addEventListener("DOMContentLoaded", async () => {
     window.location.replace("login.html");
     return;
   }
+
+  let activeAdminTab = "overview";
+
+  function formatAdminDate(value) {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString("es-CO");
+  }
+
+  async function loadTriggers() {
+    const result = await ConigAPI.request("/api/admin/triggers");
+    const body = document.getElementById("triggerTable");
+    document.getElementById("triggerTotal").textContent = Number(result.totalExecutions || 0).toLocaleString("es-CO");
+    document.getElementById("triggerTypes").textContent = result.triggerTypes || (result.triggers || []).length;
+    body.replaceChildren();
+
+    const typeSelect = document.getElementById("auditType");
+    const selectedType = typeSelect.value;
+    typeSelect.replaceChildren();
+    const allOption = node("option", "", "Todos los eventos");
+    allOption.value = "";
+    typeSelect.append(allOption);
+
+    (result.triggers || []).forEach(trigger => {
+      const option = node("option", "", trigger.label + " · " + trigger.type);
+      option.value = trigger.type;
+      typeSelect.append(option);
+
+      const row = node("tr", "");
+      row.append(node("td", "fw-semibold", trigger.label));
+      const codeCell = node("td", "small");
+      const code = node("code", "", trigger.type);
+      codeCell.append(code);
+      row.append(codeCell);
+      row.append(node("td", "small text-secondary", trigger.description));
+      row.append(node("td", "fw-semibold", Number(trigger.count || 0).toLocaleString("es-CO")));
+      row.append(node("td", "small", formatAdminDate(trigger.lastExecutedAt)));
+      row.append(node("td", "small text-capitalize", trigger.lastRegion || "—"));
+      body.append(row);
+    });
+
+    typeSelect.value = selectedType;
+    if (!(result.triggers || []).length) {
+      const row = node("tr", "");
+      const cell = node("td", "text-secondary", "No hay tipos de eventos disponibles.");
+      cell.colSpan = 6;
+      row.append(cell);
+      body.append(row);
+    }
+    document.getElementById("triggersMessage").textContent = "Los conteos reflejan eventos guardados en Atlas; un evento pendiente de entrega todavía no se contabiliza.";
+  }
+
+  async function loadAudit() {
+    const params = new URLSearchParams();
+    const from = document.getElementById("auditFrom").value;
+    const to = document.getElementById("auditTo").value;
+    const region = document.getElementById("auditRegion").value;
+    const type = document.getElementById("auditType").value;
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    if (region) params.set("region", region);
+    if (type) params.set("type", type);
+    params.set("limit", "100");
+
+    const result = await ConigAPI.request("/api/admin/audit?" + params.toString());
+    const body = document.getElementById("auditTable");
+    body.replaceChildren();
+    document.getElementById("auditCount").textContent = Number(result.total || 0).toLocaleString("es-CO") + " evento(s) encontrados. Se muestran hasta " + (result.events || []).length + " registros recientes.";
+
+    (result.events || []).forEach(event => {
+      const row = node("tr", "");
+      row.append(node("td", "small", formatAdminDate(event.occurredAt)));
+      row.append(node("td", "small fw-semibold", event.label || event.type || "Evento"));
+      row.append(node("td", "small text-capitalize", event.sourceRegion || "—"));
+      const detailCell = node("td", "");
+      const details = document.createElement("details");
+      const summary = node("summary", "small text-primary", "Ver detalles");
+      const pre = node("pre", "small bg-light rounded p-2 mt-2 mb-0");
+      pre.style.whiteSpace = "pre-wrap";
+      pre.textContent = JSON.stringify(event.payload || {}, null, 2);
+      details.append(summary, pre);
+      detailCell.append(details);
+      row.append(detailCell);
+      body.append(row);
+    });
+
+    if (!(result.events || []).length) {
+      const row = node("tr", "");
+      const cell = node("td", "text-secondary", "No hay eventos que coincidan con los filtros.");
+      cell.colSpan = 4;
+      row.append(cell);
+      body.append(row);
+    }
+    document.getElementById("auditMessage").textContent = "Por privacidad, el registro contiene identificadores y datos de evento seleccionados; no almacena contraseñas ni el contenido de los mensajes.";
+  }
+
+  async function showAdminTab(tab) {
+    activeAdminTab = tab;
+    document.querySelectorAll("[data-admin-panel]").forEach(panel => {
+      panel.classList.toggle("d-none", panel.dataset.adminPanel !== tab);
+    });
+    document.querySelectorAll("[data-admin-tab]").forEach(button => {
+      const active = button.dataset.adminTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+
+    if (tab === "triggers") {
+      document.getElementById("triggersMessage").textContent = "Consultando los eventos registrados...";
+      await loadTriggers();
+    } else if (tab === "audit") {
+      document.getElementById("auditMessage").textContent = "Consultando historial...";
+      await loadTriggers();
+      await loadAudit();
+    } else if (tab === "users") {
+      await loadUsers();
+    } else if (tab === "overview") {
+      await loadOverview();
+    }
+  }
+
+  document.querySelectorAll("[data-admin-tab]").forEach(button => {
+    button.addEventListener("click", () => {
+      showAdminTab(button.dataset.adminTab).catch(error => {
+        message.textContent = error.message;
+        if (activeAdminTab === "triggers") document.getElementById("triggersMessage").textContent = error.message;
+        if (activeAdminTab === "audit") document.getElementById("auditMessage").textContent = error.message;
+      });
+    });
+  });
+
+  document.getElementById("refreshTriggers").addEventListener("click", () => loadTriggers().catch(error => {
+    document.getElementById("triggersMessage").textContent = error.message;
+  }));
+  document.getElementById("refreshAudit").addEventListener("click", () => loadAudit().catch(error => {
+    document.getElementById("auditMessage").textContent = error.message;
+  }));
+  document.getElementById("applyAuditFilters").addEventListener("click", () => loadAudit().catch(error => {
+    document.getElementById("auditMessage").textContent = error.message;
+  }));
 
   searchInput.addEventListener("input", renderUsers);
   document.getElementById("refreshAdmin").addEventListener("click", refreshAll);

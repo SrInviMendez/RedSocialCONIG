@@ -30,14 +30,21 @@
 
   <p id="adminMessage" class="text-secondary small" aria-live="polite">Comprobando permisos...</p>
 
-  <section class="row g-3 mb-4" id="adminStats">
+  <nav class="nav nav-pills flex-wrap gap-2 mb-4" id="adminSectionMenu" aria-label="Secciones de administración">
+    <button type="button" class="nav-link active" data-admin-tab="overview"><i class="bi bi-speedometer2"></i> Resumen</button>
+    <button type="button" class="nav-link" data-admin-tab="users"><i class="bi bi-people"></i> Usuarios</button>
+    <button type="button" class="nav-link" data-admin-tab="triggers"><i class="bi bi-diagram-3"></i> Triggers</button>
+    <button type="button" class="nav-link" data-admin-tab="audit"><i class="bi bi-journal-text"></i> Auditoría</button>
+  </nav>
+
+  <section class="row g-3 mb-4" id="adminStats" data-admin-panel="overview">
     <div class="col-6 col-lg-3"><div class="card panel-card h-100"><div class="card-body"><p class="text-secondary small mb-1">Usuarios</p><h2 class="h3 mb-0" id="statUsers">—</h2></div></div></div>
     <div class="col-6 col-lg-3"><div class="card panel-card h-100"><div class="card-body"><p class="text-secondary small mb-1">Administradores</p><h2 class="h3 mb-0" id="statAdmins">—</h2></div></div></div>
     <div class="col-6 col-lg-3"><div class="card panel-card h-100"><div class="card-body"><p class="text-secondary small mb-1">Publicaciones</p><h2 class="h3 mb-0" id="statPosts">—</h2></div></div></div>
     <div class="col-6 col-lg-3"><div class="card panel-card h-100"><div class="card-body"><p class="text-secondary small mb-1">Seguimientos</p><h2 class="h3 mb-0" id="statFollows">—</h2></div></div></div>
   </section>
 
-  <section class="card panel-card mb-4">
+  <section class="card panel-card mb-4" id="adminInfrastructure" data-admin-panel="overview">
     <div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
         <div><h2 class="h5 fw-bold mb-1">Infraestructura regional</h2><p class="text-secondary small mb-0">Estado reportado por los nodos de Bogotá y Cali.</p></div>
@@ -47,7 +54,7 @@
     </div>
   </section>
 
-  <section class="card panel-card">
+  <section class="card panel-card d-none" id="adminUsersSection" data-admin-panel="users">
     <div class="card-body">
       <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
         <div><h2 class="h5 fw-bold mb-1">Usuarios y administradores</h2><p class="text-secondary small mb-0">Los cambios de permisos se sincronizan entre Bogotá y Cali.</p></div>
@@ -60,6 +67,50 @@
         </table>
       </div>
       <p id="usersMessage" class="text-secondary small mb-0"></p>
+    </div>
+  </section>
+
+  <section class="card panel-card d-none" id="adminTriggersSection" data-admin-panel="triggers">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+        <div><h2 class="h5 fw-bold mb-1">Triggers del sistema</h2><p class="text-secondary small mb-0">Conteo de eventos de CONIG que llegaron correctamente al registro de auditoría en MongoDB Atlas.</p></div>
+        <button type="button" class="btn btn-outline-primary btn-sm" id="refreshTriggers"><i class="bi bi-arrow-clockwise"></i> Actualizar</button>
+      </div>
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3"><div class="rounded border p-3 h-100"><div class="text-secondary small">Ejecuciones auditadas</div><div class="h3 mb-0" id="triggerTotal">—</div></div></div>
+        <div class="col-6 col-lg-3"><div class="rounded border p-3 h-100"><div class="text-secondary small">Tipos de trigger</div><div class="h3 mb-0" id="triggerTypes">—</div></div></div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Trigger</th><th>Identificador</th><th>Función</th><th>Ejecuciones</th><th>Última ejecución</th><th>Región</th></tr></thead>
+          <tbody id="triggerTable"><tr><td colspan="6" class="text-secondary">Selecciona Triggers para consultar los datos.</td></tr></tbody>
+        </table>
+      </div>
+      <p id="triggersMessage" class="text-secondary small mb-0"></p>
+    </div>
+  </section>
+
+  <section class="card panel-card d-none" id="adminAuditSection" data-admin-panel="audit">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+        <div><h2 class="h5 fw-bold mb-1">Auditoría de actividad</h2><p class="text-secondary small mb-0">Historial de eventos registrados, con fecha, región y datos de contexto no sensibles.</p></div>
+        <button type="button" class="btn btn-outline-primary btn-sm" id="refreshAudit"><i class="bi bi-arrow-clockwise"></i> Actualizar</button>
+      </div>
+      <div class="row g-2 align-items-end mb-3">
+        <div class="col-6 col-md-2"><label class="form-label small" for="auditFrom">Desde</label><input class="form-control form-control-sm" type="date" id="auditFrom"></div>
+        <div class="col-6 col-md-2"><label class="form-label small" for="auditTo">Hasta</label><input class="form-control form-control-sm" type="date" id="auditTo"></div>
+        <div class="col-6 col-md-2"><label class="form-label small" for="auditRegion">Región</label><select class="form-select form-select-sm" id="auditRegion"><option value="">Todas</option><option value="bogota">Bogotá</option><option value="cali">Cali</option></select></div>
+        <div class="col-6 col-md-4"><label class="form-label small" for="auditType">Tipo de evento</label><select class="form-select form-select-sm" id="auditType"><option value="">Todos los eventos</option></select></div>
+        <div class="col-12 col-md-2"><button type="button" class="btn btn-primary btn-sm w-100" id="applyAuditFilters">Aplicar filtros</button></div>
+      </div>
+      <p class="small text-secondary" id="auditCount">Consultando auditoría...</p>
+      <div class="table-responsive">
+        <table class="table align-middle">
+          <thead><tr><th>Fecha</th><th>Evento</th><th>Región</th><th>Información</th></tr></thead>
+          <tbody id="auditTable"><tr><td colspan="4" class="text-secondary">Selecciona Auditoría para consultar el historial.</td></tr></tbody>
+        </table>
+      </div>
+      <p id="auditMessage" class="text-secondary small mb-0"></p>
     </div>
   </section>
 </main>
